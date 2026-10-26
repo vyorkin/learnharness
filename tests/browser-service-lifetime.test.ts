@@ -55,7 +55,11 @@ function helperFixture(connected = true, channel = true) {
 		});
 	};
 	runInNewContext(mainSource, {
-		require: (id: string) => id === "electron" ? { app, BrowserWindow: FakeWindow }
+		require: (id: string) => id === "electron" ? {
+			app, BrowserWindow: FakeWindow,
+			// light-theme wave: native window colors resolve through nativeTheme.
+			nativeTheme: { themeSource: "system", shouldUseDarkColors: true, on() {} },
+		}
 			: id === "node:net" ? net
 			: id === "./browser-service-readiness.cjs" ? { waitForBrowserService }
 			: requireMain(id),

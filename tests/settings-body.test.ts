@@ -145,6 +145,13 @@ describe("parseAppearanceSettingsBody", () => {
 		assert.ok(parseAppearanceSettingsBody({ background: "#abc" }));
 		// null = "the mode's default" — explicit, valid
 		assert.ok(parseAppearanceSettingsBody({ background: null, fontFamily: null }));
+		// light-theme wave: "system" is a real stored mode (the OS decides
+		// the palette), so the body parser must accept all three.
+		for (const mode of ["dark", "light", "system"] as const) {
+			const r = parseAppearanceSettingsBody({ mode });
+			assert.ok(r.ok, mode);
+			assert.equal(r.ok && r.settings.mode, mode);
+		}
 	});
 
 	it("rejects non-object bodies and non-object mdRendering", () => {

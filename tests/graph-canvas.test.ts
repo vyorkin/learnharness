@@ -19,6 +19,7 @@ import {
 	fitTransform,
 	labelAlpha,
 	pickNearest,
+	regionLabelColor,
 	wrapRegionLabel,
 	zoomRatioOf,
 	LABELS_FADE_RATIO,
@@ -37,6 +38,19 @@ describe("zoomRatioOf (the sigma-compatible camera ratio)", () => {
 		assert.equal(zoomRatioOf(2, 2), 1); // at fit
 		assert.equal(zoomRatioOf(2, 4), 0.5); // zoomed in 2x -> ratio halves
 		assert.equal(zoomRatioOf(2, 1), 2); // zoomed out 2x -> ratio doubles
+	});
+});
+
+describe("regionLabelColor (cluster-label ink per mode, light-theme wave)", () => {
+	it("dark keeps the untouched soft pastel (78% lightness)", () => {
+		assert.equal(regionLabelColor(140, "dark"), "hsla(140, 55%, 78%, 0.85)");
+	});
+
+	it("light darkens the same hue so it reads on the white stage and the pastel hulls", () => {
+		assert.equal(regionLabelColor(140, "light"), "hsla(140, 55%, 30%, 0.92)");
+		// The cluster still names itself by hue — only the ink's lightness moves.
+		assert.match(regionLabelColor(210, "light"), /^hsla\(210, 55%, 30%, 0\.92\)$/);
+		assert.notEqual(regionLabelColor(210, "light"), regionLabelColor(330, "light"));
 	});
 });
 

@@ -72,6 +72,7 @@ import { planCostLabel } from "@/components/usage-format";
 import { GraphCanvasRenderer, type GraphRenderSettings } from "./graph-canvas.ts";
 import { usePopoverDismiss } from "@/components/popover-dismiss";
 import { useActivity } from "@/components/activity-dock";
+import { useAppearance } from "@/components/settings/appearance";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import { MenuShell } from "@/components/menu-shell.tsx";
 import { DeleteNodeDialog } from "@/components/delete-node-dialog.tsx";
@@ -1411,31 +1412,43 @@ export function GraphView({
 	// Feed #1 — data: positions + edges + clusters + resolved colors. Runs
 	// after the layout effect (same commit, declaration order) and after
 	// the construct effect, so the renderer exists and positions are fresh.
+	//
+	// The colors are read from CSS tokens, and a MODE SWITCH changes them
+	// in the appearance provider's effects — which React runs AFTER this
+	// one (effects flush child-first). Reading a frame later is the one
+	// ordering-safe point: by then the palette that is about to paint is
+	// the palette the computed values report.
+	const { resolvedMode } = useAppearance();
 	useEffect(() => {
 		const renderer = rendererRef.current;
 		const positions = posRef.current;
 		if (!renderer || !snapshot || snapshot.nodes.length === 0 || !positions) return;
-		renderer.setData({
-			nodes: snapshot.nodes.map((n) => ({
-				id: n.id,
-				x: positions.get(n.id)?.x ?? 0,
-				y: positions.get(n.id)?.y ?? 0,
-				label: n.name,
-			})),
-			edges: snapshot.edges.map((e) => ({ from: e.from, to: e.to })),
-			logicalEdges: snapshot.logicalEdges.map((e) => ({ from: e.from, to: e.to })),
-			impLinks: snapshot.impLinks,
-			clusters: snapshot.clusters.map((c) => ({ id: c.id, label: c.label, members: c.members })),
-			colors: {
-				node: tokenHex(NODE_COLOR_TOKEN),
-				edge: tokenHex("--ring"),
-				label: tokenHex("--muted-foreground"),
-				hoverText: tokenHex("--foreground"),
-			},
-			// Match the app typography (Geist via the body's stack).
-			fontFamily: getComputedStyle(document.body).fontFamily,
+		const frame = requestAnimationFrame(() => {
+			renderer.setData({
+				nodes: snapshot.nodes.map((n) => ({
+					id: n.id,
+					x: positions.get(n.id)?.x ?? 0,
+					y: positions.get(n.id)?.y ?? 0,
+					label: n.name,
+				})),
+				edges: snapshot.edges.map((e) => ({ from: e.from, to: e.to })),
+				logicalEdges: snapshot.logicalEdges.map((e) => ({ from: e.from, to: e.to })),
+				impLinks: snapshot.impLinks,
+				clusters: snapshot.clusters.map((c) => ({ id: c.id, label: c.label, members: c.members })),
+				colors: {
+					node: tokenHex(NODE_COLOR_TOKEN),
+					edge: tokenHex("--ring"),
+					label: tokenHex("--muted-foreground"),
+					hoverText: tokenHex("--foreground"),
+				},
+				// Match the app typography (Geist via the body's stack).
+				fontFamily: getComputedStyle(document.body).fontFamily,
+				// Palette-dependent ink (cluster labels) follows the mode.
+				mode: resolvedMode,
+			});
 		});
-	}, [snapshot, isEmpty]);
+		return () => cancelAnimationFrame(frame);
+	}, [snapshot, isEmpty, resolvedMode]);
 
 	// Feed #2 — settings: just marks the frame dirty. No rebuild, no
 	// re-layout, no camera touch (the whole point of the new renderer).

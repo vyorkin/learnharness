@@ -77,6 +77,10 @@ declare global {
 			checkForUpdates?: () => Promise<void>;
 			installUpdate?: () => void;
 			onOpenSettings?: (cb: (section: string) => void) => () => void;
+			/** Native window chrome follows the app mode
+			 *  (components/settings/appearance.tsx pushes the stored mode on
+			 *  every change; main resolves "system" against the OS). */
+			theme?: { set?: (mode: "dark" | "light" | "system") => void };
 		};
 	}
 }

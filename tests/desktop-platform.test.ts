@@ -15,7 +15,7 @@ const mainRequire = createRequire(mainFile);
 /** Decline the single-instance lock so normal boot never spawns a server.
  * Then call the REAL createWindow with a stub Electron API and inspect its
  * constructor options. No rewritten copy of the production logic. */
-function windowOptions(platform: string, env: Record<string, string> = {}) {
+function windowOptions(platform: string, env: Record<string, string> = {}, systemDark = true) {
 	class FakeWindow {
 		constructor(readonly options: unknown) {}
 		webContents = { on() {}, setWindowOpenHandler() {} };
@@ -26,6 +26,9 @@ function windowOptions(platform: string, env: Record<string, string> = {}) {
 		app: { setName() {}, getPath: () => "/fixture/LearnHarness", setPath() {}, requestSingleInstanceLock: () => false, quit() {} },
 		BrowserWindow: FakeWindow,
 		session: { defaultSession: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} } },
+		// light-theme wave: the window's native colors resolve through
+		// nativeTheme (stored mode → themeSource, "system" → the OS read).
+		nativeTheme: { themeSource: "system", shouldUseDarkColors: systemDark, on() {} },
 	};
 	const context = {
 		require: (id: string) => id === "electron" ? electron : mainRequire(id),
@@ -47,11 +50,21 @@ describe("desktop window chrome", () => {
 		assert.equal(options.autoHideMenuBar, undefined);
 	});
 
+	it("a light system preference paints the light native chrome (light-theme wave)", () => {
+		for (const platform of ["win32", "linux", "darwin"]) {
+			const options = windowOptions(platform, {}, false);
+			assert.equal(options.backgroundColor, "#f2f2f2", `${platform} lag background`);
+			if (platform !== "darwin") {
+				assert.deepEqual(options.titleBarOverlay, { color: "#f2f2f2", symbolColor: "#141414" }, platform);
+			}
+		}
+	});
+
 	for (const platform of ["win32", "linux"]) {
 		it(`${platform} uses native-height right-side controls with an Alt-accessible menu`, () => {
 			const options = windowOptions(platform);
 			assert.equal(options.titleBarStyle, "hidden");
-			assert.deepEqual(options.titleBarOverlay, { color: "#141414", symbolColor: "#e5e5e5" });
+			assert.deepEqual(options.titleBarOverlay, { color: "#141414", symbolColor: "#e5e5e5" }, "dark palette by default");
 			assert.equal(Object.hasOwn(options.titleBarOverlay, "height"), false, "omit height so the OS selects its native default");
 			assert.equal(options.trafficLightPosition, undefined);
 			assert.equal(options.autoHideMenuBar, true);
@@ -96,8 +109,11 @@ describe("desktop window chrome", () => {
 		runInNewContext(readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8"), context);
 		assert.equal(bridge.platform, "win32");
 		assert.deepEqual(Object.keys(bridge).sort(), [
-			"chatgpt", "checkForUpdates", "expandWindow", "getUpdateState", "getZoom", "installUpdate", "onOpenSettings", "onUpdateStatus", "onZoom", "platform", "subscriptions",
+			"chatgpt", "checkForUpdates", "expandWindow", "getUpdateState", "getZoom", "installUpdate", "onOpenSettings", "onUpdateStatus", "onZoom", "platform", "subscriptions", "theme",
 		]);
+		// light-theme wave: the stored mode is pushed to the main process so
+		// the native window chrome can follow it.
+		assert.deepEqual(Object.keys(bridge.theme as object), ["set"]);
 		assert.deepEqual(Object.keys(bridge.subscriptions as object).sort(), ["cancel", "consent", "disconnect", "login", "onChange", "open", "respond", "retry", "status"]);
 	});
 });

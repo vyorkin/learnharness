@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { appearanceVars, derivedPalette, resolveAppearance, staleVarNames } from "../components/settings/appearance.tsx";
+import { MODE_DEFAULT_BACKGROUND, modeClassName, prePaintScript, resolveMode } from "../src/core";
 import {
 	PROMPT_IN_USE_HINT,
 	composePromptSwitch,
@@ -44,7 +45,7 @@ describe("resolveAppearance — delta over factory", () => {
 
 describe("derivedPalette — the dark curve keeps today's relationships", () => {
 	it("the factory background reproduces today's palette EXACTLY", () => {
-		assert.deepEqual(derivedPalette("#141414"), {
+		assert.deepEqual(derivedPalette("#141414", "dark"), {
 			"--background": "#141414",
 			"--card": "#1c1c1c",
 			"--popover": "#1c1c1c",
@@ -58,20 +59,89 @@ describe("derivedPalette — the dark curve keeps today's relationships", () => 
 	});
 
 	it("an off-factory background shifts every surface with it (clamped at 255)", () => {
-		const p = derivedPalette("#f0f0f0");
+		const p = derivedPalette("#f0f0f0", "dark");
 		assert.equal(p["--background"], "#f0f0f0");
 		assert.equal(p["--card"], "#f8f8f8"); // 240 + 8 per channel
 		assert.equal(p["--border"], "#ffffff", "240 + 47 clamps to 255 on every channel");
 	});
 
 	it("3-digit hex expands", () => {
-		assert.equal(derivedPalette("#abc")["--card"], "#b2c3d4"); // aa bb cc each +8
+		assert.equal(derivedPalette("#abc", "dark")["--card"], "#b2c3d4"); // aa bb cc each +8
+	});
+});
+
+describe("derivedPalette — the light curve (light-theme wave)", () => {
+	it("the light factory background reproduces the light palette's surfaces", () => {
+		assert.deepEqual(derivedPalette("#f2f2f2", "light"), {
+			"--background": "#f2f2f2",
+			"--card": "#ffffff", // 242 + 13 clamps to 255
+			"--popover": "#ffffff",
+			"--secondary": "#ffffff",
+			"--muted": "#ffffff",
+			"--accent": "#e6e6e6", // 242 − 12
+			"--border": "#cfcfcf", // 242 − 35
+			"--input": "#cfcfcf",
+			"--primary-foreground": "#ffffff", // the card: primary sits on the raised surface
+		});
+	});
+
+	it("a mid grey background darkens the edges and lightens the card", () => {
+		const p = derivedPalette("#808080", "light");
+		assert.equal(p["--card"], "#8d8d8d", "128 + 13");
+		assert.equal(p["--accent"], "#747474", "128 − 12");
+		assert.equal(p["--border"], "#5d5d5d", "128 − 35");
+	});
+
+	it("clamps at 0 on a near-black background", () => {
+		const p = derivedPalette("#050505", "light");
+		assert.equal(p["--accent"], "#000000");
+		assert.equal(p["--border"], "#000000");
+	});
+});
+
+describe("mode resolution (light-theme wave)", () => {
+	it("resolveMode: explicit modes ignore the OS; system follows it", () => {
+		assert.equal(resolveMode("dark", false), "dark");
+		assert.equal(resolveMode("light", true), "light");
+		assert.equal(resolveMode("system", true), "dark");
+		assert.equal(resolveMode("system", false), "light");
+	});
+
+	it("modeClassName: only dark carries a class (light is the :root palette)", () => {
+		assert.equal(modeClassName("dark"), "dark");
+		assert.equal(modeClassName("light"), "");
+	});
+
+	it("prePaintScript: only the system mode needs the pre-paint flip", () => {
+		assert.equal(prePaintScript("dark"), null);
+		assert.equal(prePaintScript("light"), null);
+		const script = prePaintScript("system");
+		assert.ok(script !== null && script.includes("prefers-color-scheme: dark"));
+		assert.ok(script!.includes('classList.add("dark")'));
+	});
+
+	it("MODE_DEFAULT_BACKGROUND names each mode's own canvas", () => {
+		assert.equal(MODE_DEFAULT_BACKGROUND.dark, "#141414");
+		assert.equal(MODE_DEFAULT_BACKGROUND.light, "#f2f2f2");
+	});
+});
+
+describe("appearanceVars — light mode takes the light curve", () => {
+	it("the same background hex derives differently per resolved mode", () => {
+		const delta = resolveAppearance({ background: "#808080" });
+		assert.equal(appearanceVars(delta, "dark")["--card"], "#888888", "dark: +8");
+		assert.equal(appearanceVars(delta, "light")["--card"], "#8d8d8d", "light: +13 toward white");
+	});
+
+	it("system resolves to a curve before the vars are applied", () => {
+		const delta = resolveAppearance({ mode: "system", background: "#808080" });
+		assert.equal(appearanceVars(delta, resolveMode(delta.mode, false))["--border"], "#5d5d5d");
 	});
 });
 
 describe("appearanceVars — the mapping the provider applies", () => {
 	it("factory appearance: only the always-applied tokens move", () => {
-		const vars = appearanceVars(resolveAppearance(undefined));
+		const vars = appearanceVars(resolveAppearance(undefined), "dark");
 		assert.equal(vars["--lh-prose-size"], "16px");
 		assert.equal(vars["--lh-heading-weight"], "900");
 		assert.equal(vars["--font-prose"], undefined, "no font override at factory");
@@ -89,6 +159,7 @@ describe("appearanceVars — the mapping the provider applies", () => {
 				sessionNameSerif: false,
 				mdRendering: { headingWeight: 700, boldColor: "#ff0000", italicColor: "#00ff00" },
 			}),
+			"dark",
 		);
 		assert.equal(vars["--background"], "#101820");
 		assert.equal(vars["--card"], "#182028", "raised +8 per channel: 10→18, 18→20, 20→28");
@@ -101,7 +172,7 @@ describe("appearanceVars — the mapping the provider applies", () => {
 	});
 
 	it("sessionNameSerif false alone: titles move, nothing else does", () => {
-		const vars = appearanceVars(resolveAppearance({ sessionNameSerif: false }));
+		const vars = appearanceVars(resolveAppearance({ sessionNameSerif: false }), "dark");
 		assert.equal(vars["--font-title"], "var(--font-prose)");
 		assert.equal(Object.keys(vars).length, 3, "prose-size, heading-weight, font-title only");
 	});
@@ -116,9 +187,10 @@ describe("staleVarNames — the removal half of application (owner repro: resets
 				sessionNameSerif: false,
 				mdRendering: { headingWeight: 700, boldColor: "#ff0000", italicColor: "#00ff00" },
 			}),
+			"dark",
 		);
 		const applied = Object.keys(fullDelta);
-		const factory = appearanceVars(resolveAppearance(undefined));
+		const factory = appearanceVars(resolveAppearance(undefined), "dark");
 		const stale = staleVarNames(applied, factory);
 		assert.ok(stale.includes("--background"));
 		assert.ok(stale.includes("--font-prose"));
@@ -130,8 +202,8 @@ describe("staleVarNames — the removal half of application (owner repro: resets
 	});
 
 	it("an empty background commit (null = factory) frees the palette vars", () => {
-		const withBg = appearanceVars(resolveAppearance({ background: "#101010" }));
-		const emptied = appearanceVars(resolveAppearance({ background: null }));
+		const withBg = appearanceVars(resolveAppearance({ background: "#101010" }), "dark");
+		const emptied = appearanceVars(resolveAppearance({ background: null }), "dark");
 		const stale = staleVarNames(Object.keys(withBg), emptied);
 		assert.ok(stale.includes("--background"));
 		assert.ok(stale.includes("--card"), "the derived palette follows the background out");
@@ -139,7 +211,7 @@ describe("staleVarNames — the removal half of application (owner repro: resets
 	});
 
 	it("no previous applications → nothing stale", () => {
-		assert.deepEqual(staleVarNames([], appearanceVars(resolveAppearance(undefined))), []);
+		assert.deepEqual(staleVarNames([], appearanceVars(resolveAppearance(undefined), "dark")), []);
 	});
 });
 

@@ -11,6 +11,10 @@
  *   threshold (928px) when the sidebar is opened below it. The main
  *   process clamps: no-op if the window is already wide enough.
  *
+ *   window.lh.theme.set(mode) — the app's stored appearance mode
+ *   (dark | light | system), pushed on every change so the native window
+ *   background and Windows/Linux title-bar controls match the page.
+ *
  *   window.lh.onZoom(cb) / window.lh.getZoom() — the zoom truth (owner
  *   round 7, 2026-10-05): every ⌘±/⌘0 change arrives as "lh:zoom" with
  *   the new factor; getZoom covers the first-paint race. The renderer
@@ -74,6 +78,10 @@ contextBridge.exposeInMainWorld("lh", {
 		},
 	},
 	expandWindow: () => ipcRenderer.send("lh:expand-window"),
+	// Theme (light-theme wave, 2026-10-26): push the STORED mode so the main
+	// process can keep nativeTheme.themeSource honest ("system" must stay
+	// "system", otherwise the renderer's own prefers-color-scheme would lie).
+	theme: { set: (mode) => ipcRenderer.send("lh:theme-set", mode) },
 	onZoom: (cb) => {
 		const listener = (_event, factor) => cb(factor);
 		ipcRenderer.on("lh:zoom", listener);

@@ -24,7 +24,7 @@
  *     would shadow every settings-page key change until restart.
  */
 
-const { app, BrowserWindow, Menu, ipcMain, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, nativeTheme, session, shell } = require("electron");
 const { createChatGPT, fileStore } = require("./chatgpt.cjs");
 const { attachChatGPTChild, trustedSender, chatGPTControl } = require("./chatgpt-ipc.cjs");
 const { createSubscriptions, loadSubscriptionSDK } = require("./subscriptions.cjs");
@@ -53,6 +53,49 @@ const PRODUCT_NAME = "LearnHarness";
 app.setName(PRODUCT_NAME);
 const AUTH_FILE = () => path.join(app.getPath("userData"), "auth.json");
 const DATA_DIR = () => path.join(app.getPath("userData"), "data");
+
+/** The two palettes as the NATIVE chrome needs them — plain hex, because the
+ *  window background and the Windows/Linux title-bar overlay cannot read CSS
+ *  variables. Mirrors app/globals.css (`:root` light, `.dark` dark); the
+ *  renderer's AppearanceProvider pushes the stored mode over "lh:theme-set"
+ *  on every change, and nativeTheme's own update event covers an OS
+ *  appearance change while the stored mode is "system". */
+const MODE_COLORS = {
+	dark: { background: "#141414", symbol: "#e5e5e5" },
+	light: { background: "#f2f2f2", symbol: "#141414" },
+};
+
+/** The appearance mode on disk (userData/data/settings.json), read without
+ *  booting the app's own settings stack — used for the window background
+ *  BEFORE the renderer exists. Absent/unreadable = "system". */
+function storedMode() {
+	try {
+		const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR(), "settings.json"), "utf8"));
+		const mode = raw?.appearance?.mode;
+		if (mode === "dark" || mode === "light" || mode === "system") return mode;
+	} catch {
+		/* no settings.json yet — first boot */
+	}
+	return "system";
+}
+
+/** Paint the given mode onto a window: the native lag background (resize /
+ *  first paint) and, where the platform draws them, the title-bar controls. */
+function applyModeToWindow(win) {
+	if (!win || win.isDestroyed()) return;
+	const mode = nativeTheme.themeSource === "dark" || nativeTheme.themeSource === "light"
+		? nativeTheme.themeSource
+		: nativeTheme.shouldUseDarkColors ? "dark" : "light";
+	const colors = MODE_COLORS[mode];
+	win.setBackgroundColor(colors.background);
+	if (process.platform !== "darwin") {
+		try {
+			win.setTitleBarOverlay({ color: colors.background, symbolColor: colors.symbol });
+		} catch {
+			/* window without a title-bar overlay (older Electron / fullscreen) */
+		}
+	}
+}
 
 /** The packaged standalone server (extraResources → Resources/server).
  *  In dev LH_DEV_URL short-circuits everything: no spawn, no packaging —
@@ -308,7 +351,12 @@ function createWindow(url) {
 				// height. Do not force the zoom-invariant native overlay to match
 				// the renderer's 60 CSS px bar: zooming out would cover its border.
 				// The renderer reserves the actual width via env(titlebar-area-*).
-				titleBarOverlay: { color: "#141414", symbolColor: "#e5e5e5" },
+				// Colors follow the app mode (see MODE_COLORS; the renderer pushes
+				// changes, applyModeToWindow repaints).
+				titleBarOverlay: {
+					color: (nativeTheme.shouldUseDarkColors ? MODE_COLORS.dark : MODE_COLORS.light).background,
+					symbolColor: (nativeTheme.shouldUseDarkColors ? MODE_COLORS.dark : MODE_COLORS.light).symbol,
+				},
 				// Keep the custom bar alone; Alt reveals the native menu.
 				autoHideMenuBar: true,
 			}),
@@ -323,10 +371,11 @@ function createWindow(url) {
 		// the native window surface changes size before Chromium's compositor
 		// has a frame at the new size, and the gap shows the window's NATIVE
 		// background — Electron's default is white, glaring on a dark app.
-		// The app background (#141414) fills the lag instead. `show: false` +
-		// ready-to-show is the same treatment for first paint: the window
-		// appears only once the page has actually rendered.
-		backgroundColor: "#141414",
+		// The app's own background fills the lag instead, resolved from the
+		// stored mode (MODE_COLORS). `show: false` + ready-to-show is the same
+		// treatment for first paint: the window appears only once the page has
+		// actually rendered.
+		backgroundColor: (nativeTheme.shouldUseDarkColors ? MODE_COLORS.dark : MODE_COLORS.light).background,
 		show: false,
 		// Narrow-window behavior (owner, 2026-09-17): 640px is the floor —
 		// below it even a wrapped chrome row gets cramped and the chat header
@@ -646,6 +695,10 @@ async function main() {
 
 	await app.whenReady();
 
+	// First paint of the native chrome: the stored mode decides themeSource
+	// ("system" stays the default) — the renderer's push confirms it later.
+	nativeTheme.themeSource = storedMode();
+
 	// Dev mode: point at a running `next dev` server (LH_DEV_URL) — no
 	// spawn, no packaging, full HMR. The rest of this shell still applies
 	// (guards, menu, single instance).
@@ -734,6 +787,22 @@ async function main() {
 	// The renderer's first paint can race did-finish-load — it asks for
 	// the current factor itself (mirrors "lh:zoom" pushes).
 	ipcMain.handle("lh:zoom:get", (event) => BrowserWindow.fromWebContents(event.sender)?.webContents.getZoomFactor() ?? 1);
+
+	// Theme (light-theme wave, 2026-10-26): the renderer pushes the STORED
+	// mode (dark | light | system) whenever it changes. themeSource takes it
+	// verbatim, so "system" keeps following the OS (and keeps the renderer's
+	// prefers-color-scheme honest); the window colors resolve it.
+	// nativeTheme's "updated" event repaints every window when the OS flips.
+	ipcMain.on("lh:theme-set", (event, mode) => {
+		const win = BrowserWindow.fromWebContents(event.sender);
+		if (!win || !trustedAppWindows.has(win)) return;
+		if (mode !== "dark" && mode !== "light" && mode !== "system") return;
+		nativeTheme.themeSource = mode;
+		applyModeToWindow(win);
+	});
+	nativeTheme.on("updated", () => {
+		for (const win of BrowserWindow.getAllWindows()) applyModeToWindow(win);
+	});
 	ipcMain.on("lh:expand-window", (event) => {
 		const win = BrowserWindow.fromWebContents(event.sender);
 		if (!win) return;

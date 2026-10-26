@@ -138,10 +138,13 @@ describe("the emphasis-ink factory ruling (globals.css)", () => {
 		assert.ok(!css.includes("--lh-ink-italic: #6fa9d6"), "italic factory is not the old blue");
 	});
 
-	it("both blocks default the inks to the regular text color", () => {
+	it("the inks default to the regular text color, declared ONCE (they follow the mode's foreground)", () => {
+		// light-theme wave: the palette split into :root (light) and .dark, but
+		// the ink tokens are mode-independent — var(--foreground) resolves to
+		// whichever block won, so duplicating them would only invite drift.
 		const css = fs.readFileSync("app/globals.css", "utf-8");
-		assert.equal((css.match(/--lh-ink-strong: var\(--foreground\)/g) ?? []).length, 2, "both theme blocks");
-		assert.equal((css.match(/--lh-ink-italic: var\(--foreground\)/g) ?? []).length, 2, "both theme blocks");
+		assert.equal((css.match(/--lh-ink-strong: var\(--foreground\)/g) ?? []).length, 1, "one declaration");
+		assert.equal((css.match(/--lh-ink-italic: var\(--foreground\)/g) ?? []).length, 1, "one declaration");
 	});
 
 	it("the appearance rows' empty-state labels say 'same as text'", () => {

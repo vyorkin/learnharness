@@ -226,12 +226,20 @@ describe("KeysSection (thin SSR)", () => {
 });
 
 describe("AppearanceSection (thin SSR)", () => {
-	it("mode is rendered DISABLED — dark-only this wave, no lying control", () => {
+	it("mode offers Dark / Light / System and is live (light-theme wave)", () => {
 		const html = renderToStaticMarkup(<AppearanceSection appearance={undefined} onSectionChange={() => {}} />);
-		assert.ok(tagOf(html, "select-mode").includes("disabled"), "mode select disabled");
-		assert.ok(html.includes("Coming soon"));
-		// The whole row dims, graph-view style (the control never adds its own).
-		assert.ok(tagOf(html, "row-mode").includes("opacity-40"), "mode row dims whole");
+		assert.ok(!tagOf(html, "select-mode").includes("disabled"), "the mode control is live now");
+		for (const mode of ["dark", "light", "system"]) {
+			assert.ok(html.includes(`<option value="${mode}"`), `option ${mode}`);
+		}
+		assert.ok(!tagOf(html, "row-mode").includes("opacity-40"), "row no longer dims");
+	});
+
+	it("a stored mode renders selected", () => {
+		const html = renderToStaticMarkup(
+			<AppearanceSection appearance={{ mode: "light" }} onSectionChange={() => {}} />,
+		);
+		assert.ok(html.includes('<option value="light" selected="">'), "the stored mode is what the row shows");
 	});
 
 	it("hex inputs carry the factory placeholders; prose size resolves against the factory", () => {

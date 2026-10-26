@@ -71,6 +71,7 @@ import {
 	type GraphRenderSettings,
 	type LayoutNode,
 	type Position,
+	type ResolvedMode,
 } from "@/src/core";
 
 export type { GraphRenderSettings };
@@ -132,6 +133,9 @@ export interface CanvasData {
 	impLinks?: ReadonlyArray<{ id: string; premises: ReadonlyArray<string>; conclusion: string }>;
 	clusters: CanvasCluster[];
 	colors: CanvasColors;
+	/** The palette actually painted — the cluster-label ink depends on it
+	 *  (light hues at 78% lightness are invisible on the light canvas). */
+	mode: ResolvedMode;
 	/** Body font family (labels must match the app typography). */
 	fontFamily: string;
 }
@@ -168,6 +172,26 @@ const LABEL_WEIGHT = "500";
 const REGION_LABEL_MAX_WIDTH = 220; // screen px
 const REGION_LABEL_MAX_LINES = 3;
 const REGION_LABEL_LINE_HEIGHT = 1.3;
+
+/** Cluster-label ink per mode, as hsl components (light-theme wave,
+ *  2026-10-26 — owner: `цвета надписей должны быть читаемые`). The hue is
+ *  the cluster's own (clusterHue), so a label still names its region:
+ *
+ *    dark   78% lightness is a soft pastel ON the dark canvas (unchanged);
+ *    light  30% keeps ~7:1 contrast over the white stage and over the
+ *           blurred pastel hulls — 78% there was invisible (owner's graph
+ *           screenshot). Saturation is slightly lower and alpha a touch
+ *           higher so the smaller ink mass still reads. */
+const REGION_LABEL_INK: Record<ResolvedMode, { saturation: number; lightness: number; alpha: number }> = {
+	dark: { saturation: 55, lightness: 78, alpha: 0.85 },
+	light: { saturation: 55, lightness: 30, alpha: 0.92 },
+};
+
+/** The region-label fillStyle for a cluster hue. Pure — exported for tests. */
+export function regionLabelColor(hue: number, mode: ResolvedMode): string {
+	const ink = REGION_LABEL_INK[mode];
+	return `hsla(${hue}, ${ink.saturation}%, ${ink.lightness}%, ${ink.alpha})`;
+}
 
 /** Wrap one region label: word-wise first (session names), then
  *  char-wise for words alone wider than the max (long file paths — the
@@ -1725,7 +1749,7 @@ export class GraphCanvasRenderer {
 			const lineH = (settings.clusterLabelSize * REGION_LABEL_LINE_HEIGHT) / k;
 			for (const rm of this.regionMeta) {
 				if (!rm.lines) continue;
-				ctx.fillStyle = `hsla(${rm.hue}, 55%, 78%, 0.85)`;
+				ctx.fillStyle = regionLabelColor(rm.hue, data.mode);
 				const firstOffset = (-(rm.lines.length - 1) / 2) * lineH;
 				for (let i = 0; i < rm.lines.length; i++) {
 					ctx.fillText(rm.lines[i]!, rm.cx, rm.cy + firstOffset + i * lineH);

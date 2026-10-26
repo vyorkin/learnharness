@@ -37,6 +37,9 @@ describe("resolveSettings", () => {
 		assert.equal(eff.models.cheap, null);
 		assert.equal(eff.models.vision, null);
 		assert.equal(eff.appearance.mode, "dark");
+		// light-theme wave: "system" is stored verbatim — resolution to a
+		// palette happens in the renderer, never in this core resolver.
+		assert.equal(resolveSettings({ version: 1, appearance: { mode: "system" } }).appearance.mode, "system");
 		assert.equal(eff.appearance.background, null);
 		assert.equal(eff.appearance.fontFamily, null);
 		assert.equal(eff.appearance.proseFontSize, 16);

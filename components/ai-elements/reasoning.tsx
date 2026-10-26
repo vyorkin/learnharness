@@ -196,8 +196,9 @@ export type ReasoningContentProps = ComponentProps<
   children: string;
 };
 
-// Shares message.tsx's Streamdown config (math delimiters, dark mermaid,
-// remark-breaks) — reasoning renders the same contract as message text.
+// Shares message.tsx's Streamdown config (math delimiters, mode-aware
+// mermaid, remark-breaks) — reasoning renders the same contract as message
+// text.
 
 export const ReasoningContent = memo(
   ({ className, children, ...props }: ReasoningContentProps) => (
