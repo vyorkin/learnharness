@@ -124,9 +124,34 @@ export interface NamingRunStats {
  *  v2 (2026-10-26): CONTENT-ADDRESSED IDS — node ids are derived from the
  *  normalized statement and chain ids from the (premises, conclusion) key
  *  (core/graph.ts), so two machines' ledgers union idempotently. v1 data is
- *  still READ (ids are opaque); scripts/migrate-hash-ids.ts rewrites it. */
-export const CURRENT_GRAPH_FORMAT_VERSION = 2;
+ *  still READ (ids are opaque); scripts/migrate-hash-ids.ts rewrites it.
+ *
+ *  v3 (2026-10-26): DELETION TOMBSTONES — deleted.jsonl carries one line per
+ *  id the user deleted, and the derivation filters every line created at or
+ *  before its stamp. A v2 build would ignore that ledger and resurrect what
+ *  a sync merges back, so the stamp moves honestly. */
+export const CURRENT_GRAPH_FORMAT_VERSION = 3;
 
+
+/**
+ * deleted.jsonl line (format v3, 2026-10-26): one id the user deleted.
+ *
+ * The destructive seam (core/graph-deletion.ts) still REWRITES the ledgers —
+ * that is how a machine forgets. But a rewrite is invisible to a union of two
+ * machines' ledgers, so the append-only tombstone is what makes a deletion
+ * travel: a merge unions `deleted.jsonl` and the derivation filters every
+ * line of that id whose `createdAt` is at or before `deletedAt`. Re-learning
+ * the fact afterwards stamps a LATER line, which survives — deletion removes
+ * what existed, it does not blacklist the idea.
+ */
+export interface GraphTombstone {
+	/** The dead node id ("n_…") or chain/argument id ("arg_…"). */
+	id: string;
+	/** ISO stamp of the deletion — the filter's cutoff. */
+	deletedAt: string;
+	/** Why it died (provenance of the tombstone itself; never a filter). */
+	reason: "chat-delete" | "node-delete";
+}
 
 export interface GraphNode {
 	/** Opaque stable id, store-assigned: "n_" + nanoid-like. */

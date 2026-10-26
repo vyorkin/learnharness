@@ -59,6 +59,7 @@ import type {
 	CoverageEntry,
 	GraphChain,
 	GraphNode,
+	GraphTombstone,
 	SessionCheckpoint,
 } from "./contracts.ts";
 import type { GraphStore } from "./ports.ts";
@@ -210,6 +211,10 @@ export function deleteChatTraces(graphStore: GraphStore, chatId: string, mode: C
 		checkpoints,
 	});
 
+	// 3b. Tombstones for what died completely, so a sync cannot bring it back.
+	const removedChainIds = chainLines.filter((line) => !outChains.includes(line)).map((line) => line.id);
+	tombstoneDead(graphStore, [...deadNodes, ...removedChainIds], "chat-delete");
+
 	// 4. Positions: prune dead nodes AND dead chains (an argument's derived
 	//    implication node carries the chain's arg_ id — stale resting spots
 	//    would pin nothing; pruning keeps the ledger honest and the
@@ -280,6 +285,25 @@ function chainLinesOf(graphStore: GraphStore, chainId: string): GraphChain[] {
 }
 
 /**
+ * TOMBSTONES (format v3, 2026-10-26): a rewrite is how THIS machine forgets;
+ * `deleted.jsonl` is what makes the deletion survive a union with another
+ * machine's ledgers (scripts/lh-sync.ts). One line per id that died
+ * COMPLETELY — a node whose other lines still live is never tombstoned, or
+ * the filter (core/graph.ts getGraph: everything created at or before the
+ * stamp) would kill the surviving lines too. Idempotent: an id already
+ * tombstoned is skipped, so a second deletion run appends nothing.
+ */
+function tombstoneDead(graphStore: GraphStore, ids: Iterable<string>, reason: GraphTombstone["reason"]): void {
+	const already = new Set(graphStore.readDeletions().map((tombstone) => tombstone.id));
+	const deletedAt = new Date().toISOString();
+	for (const id of ids) {
+		if (already.has(id)) continue;
+		already.add(id);
+		graphStore.appendDeletion({ id, deletedAt, reason });
+	}
+}
+
+/**
  * Full-death one node (or one argument, by its arg_ id). Returns null
  * when no such node/chain exists (the orchestration maps that to 404);
  * rewrites only the ledgers that changed (unchanged files keep their
@@ -295,6 +319,7 @@ export function deleteNodeTraces(graphStore: GraphStore, nodeId: string): NodeDe
 		const outChains = chainLines.filter((line) => line.id !== nodeId);
 		if (outChains.length === chainLines.length) return null; // unknown argument
 		graphStore.rewriteLedgers({ chains: outChains });
+		tombstoneDead(graphStore, [nodeId], "node-delete");
 		const positions = graphStore.readPositions();
 		if (positions[nodeId] !== undefined) {
 			const { [nodeId]: _dead, ...rest } = positions;
@@ -317,6 +342,11 @@ export function deleteNodeTraces(graphStore: GraphStore, nodeId: string): NodeDe
 		nodes: outNodes,
 		...(outChains.length !== chainLines.length ? { chains: outChains } : {}),
 	});
+	tombstoneDead(
+		graphStore,
+		[nodeId, ...chainLines.filter((line) => !outChains.includes(line)).map((line) => line.id)],
+		"node-delete",
+	);
 
 	// The resting positions die with the node and every dead chain.
 	const deadChainIds = new Set(chainLines.filter((line) => !outChains.includes(line)).map((line) => line.id));

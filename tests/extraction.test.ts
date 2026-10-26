@@ -36,7 +36,7 @@ import type {
 	ExtractionRunUsage,
 	GraphChain,
 	GraphNode,
-
+	GraphTombstone,
 	NotesSource,
 	SessionCheckpoint,
 	SessionFindings,
@@ -85,6 +85,7 @@ function memoryLedgers() {
 	const coverage: CoverageEntry[] = [];
 	const sources = new Map<string, NotesSource>();
 	const positions = new Map<string, { x: number; y: number }>();
+	const tombstones: GraphTombstone[] = [];
 		return {
 		appendNode: (n: GraphNode) => void nodes.push(n),
 		readNodes: () => nodes.map((n) => ({ ...n })),
@@ -123,7 +124,11 @@ function memoryLedgers() {
 			if (next.chains) chains.splice(0, chains.length, ...next.chains.map((c) => ({ ...c, premises: [...c.premises], provenance: [...c.provenance] })));
 			if (next.coverage) coverage.splice(0, coverage.length, ...next.coverage.map((c) => ({ ...c })));
 			if (next.checkpoints) checkpoints.splice(0, checkpoints.length, ...next.checkpoints.map((c) => ({ ...c })));
+			if (next.deletions) tombstones.splice(0, tombstones.length, ...next.deletions.map((t) => ({ ...t })));
 		},
+		// Deletion tombstones (format v3) — append-only.
+		appendDeletion: (tombstone) => void tombstones.push({ ...tombstone }),
+		readDeletions: () => tombstones.map((t) => ({ ...t })),
 	} satisfies GraphStore;
 }
 

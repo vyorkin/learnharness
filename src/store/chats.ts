@@ -9,10 +9,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { PATHS } from "../../config.ts";
+import { CHAT_TOMBSTONES_FILE, PATHS } from "../../config.ts";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
-import type { ChatRecord, ChatSettings, ChatSummary, ExtractionRunUsage, PlanTree, TurnUsage } from "../core/contracts.ts";
+import type { ChatRecord, ChatSettings, ChatSummary, ChatTombstone, ExtractionRunUsage, PlanTree, TurnUsage } from "../core/contracts.ts";
 import { CURRENT_CHAT_VERSION } from "../core/contracts.ts";
 import type { LhMessage } from "../core/native-messages.ts";
 import { activeProblemOf, danglingQuestionOf } from "../core/native-messages.ts";
@@ -58,7 +58,42 @@ function writeChat(record: ChatRecord): void {
 	fs.writeFileSync(chatFile(record.id), JSON.stringify({ ...record, version: CURRENT_CHAT_VERSION }, null, "\t"), "utf-8");
 }
 
+/**
+ * CHAT TOMBSTONES (data/chats/deleted.jsonl, 2026-10-26): a deleted chat's id,
+ * append-only, so a cross-machine union cannot resurrect it (scripts/lh-sync.ts
+ * unions the file). Chat ids are never reused, so a tombstone is permanent —
+ * no timestamp comparison. Tolerant reads: a corrupt line never hides a chat.
+ */
+function readChatTombstones(): ChatTombstone[] {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(CHAT_TOMBSTONES_FILE, "utf-8");
+	} catch {
+		return []; // never deleted anything here — the documented empty state
+	}
+	const out: ChatTombstone[] = [];
+	for (const line of raw.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			const parsed = JSON.parse(trimmed) as { id?: unknown; deletedAt?: unknown };
+			if (typeof parsed.id === "string" && typeof parsed.deletedAt === "string") {
+				out.push({ id: parsed.id, deletedAt: parsed.deletedAt });
+			}
+		} catch {
+			/* a torn append must never blank the sidebar */
+		}
+	}
+	return out;
+}
+
+function appendChatTombstone(id: string): void {
+	fs.mkdirSync(PATHS.chats, { recursive: true });
+	fs.appendFileSync(CHAT_TOMBSTONES_FILE, `${JSON.stringify({ id, deletedAt: new Date().toISOString() })}\n`, "utf-8");
+}
+
 function getChat(id: string): ChatRecord | null {
+	if (readChatTombstones().some((tombstone) => tombstone.id === id)) return null;
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(fs.readFileSync(chatFile(id), "utf-8"));
@@ -79,10 +114,13 @@ function getChat(id: string): ChatRecord | null {
 function listChats(): ChatSummary[] {
 	try {
 		fs.mkdirSync(PATHS.chats, { recursive: true });
+		const tombstones = new Set(readChatTombstones().map((tombstone) => tombstone.id));
 		return fs
 			.readdirSync(PATHS.chats)
 			.filter((f) => f.endsWith(".json"))
-			.map((f) => getChat(f.slice(0, -5)))
+			.map((f) => f.slice(0, -5))
+			.filter((id) => !tombstones.has(id))
+			.map((id) => getChat(id))
 			.filter((r): r is ChatRecord => r !== null)
 			.map(({ messages, tree, turns, extractions, ...summary }) => {
 				// Per-record isolation (Wave B): a record whose messages fail the
@@ -188,6 +226,9 @@ function renameChat(id: string, title: string): ChatRecord {
 function deleteChat(id: string): boolean {
 	try {
 		fs.unlinkSync(chatFile(id));
+		// THE TOMBSTONE (2026-10-26): the unlink is how this machine forgets; the
+		// append-only line is what stops a sync from bringing the chat back.
+		appendChatTombstone(id);
 		emit("chats-changed", {}); // only a real removal — the present-entry law
 		return true;
 	} catch {

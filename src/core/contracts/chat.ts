@@ -27,6 +27,18 @@ import type { EmissionStats } from "./graph.ts";
  *  practice agent, its two tools, no extraction, no graph writes. */
 export type ChatKind = "teach" | "practice";
 
+/**
+ * data/chats/deleted.jsonl line (2026-10-26, cross-machine sync): one chat the
+ * user deleted. `deleteChat` removes the record AND appends a tombstone, and
+ * the adapter hides a tombstoned id on every read — so a union of two
+ * machines' chat directories cannot resurrect a session. Chat ids are never
+ * reused, so a tombstone is permanent (no timestamp comparison needed).
+ */
+export interface ChatTombstone {
+	id: string;
+	deletedAt: string;
+}
+
 export interface ChatRecord {
 	id: string;
 	title: string;

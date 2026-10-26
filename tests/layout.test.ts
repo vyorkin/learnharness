@@ -110,6 +110,7 @@ describe("settleGraphLayout", () => {
 		const store = {
 			readNodes: () => lines.map((l) => ({ ...l })),
 			readChains: () => [chain("arg_ab", ["a"], "b"), chain("arg_bcd", ["b", "c"], "d")],
+			readDeletions: () => [],
 			readPositions: () => ({} as Record<string, Position>),
 			writePositions: (p: Record<string, Position>) => void written.push(p),
 		};
@@ -125,6 +126,7 @@ describe("settleGraphLayout", () => {
 		settleGraphLayout({
 			readNodes: () => [],
 			readChains: () => [],
+			readDeletions: () => [],
 			readPositions: () => ({} as Record<string, Position>),
 			writePositions: (p) => void written.push(p),
 		});

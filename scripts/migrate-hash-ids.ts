@@ -244,9 +244,22 @@ if (!APPLY) {
 }
 
 // ─── write ───────────────────────────────────────────────────────────────────
-for (const file of [nodesFile, chainsFile, positionsFile, formatFile]) backup(file);
-writeAtomic(nodesFile, jsonl(migratedNodes));
-writeAtomic(chainsFile, jsonl(migratedChains));
-if (positionsBody !== undefined) writeAtomic(positionsFile, positionsBody);
-writeAtomic(formatFile, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION }, null, "\t") + "\n");
-console.log("[migrate] written; backups: *.pre-hashids-" + stamp);
+// Only files whose bytes change are rewritten (a re-run on migrated data then
+// only re-stamps the sidecar, and the graph revision does not move).
+function writeIfChanged(file: string, body: string): void {
+	let current: string | undefined;
+	try {
+		current = fs.readFileSync(file, "utf-8");
+	} catch {
+		current = undefined;
+	}
+	if (current === body) return;
+	backup(file);
+	writeAtomic(file, body);
+}
+
+writeIfChanged(nodesFile, jsonl(migratedNodes));
+writeIfChanged(chainsFile, jsonl(migratedChains));
+if (positionsBody !== undefined) writeIfChanged(positionsFile, positionsBody);
+writeIfChanged(formatFile, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION }, null, "\t") + "\n");
+console.log("[migrate] done (backups beside any rewritten file: *.pre-hashids-" + stamp + ")");

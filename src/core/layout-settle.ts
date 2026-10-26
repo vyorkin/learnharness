@@ -1,4 +1,4 @@
-import type { GraphChain, GraphNode, Position } from "./contracts.ts";
+import type { GraphChain, GraphNode, GraphTombstone, Position } from "./contracts.ts";
 import { incrementalLayout } from "./layout.ts";
 import { attachImpToCommunities, birthSessionPartition } from "./session-clusters.ts";
 import { deriveView, getGraph } from "./graph.ts";
@@ -26,6 +26,7 @@ import { deriveView, getGraph } from "./graph.ts";
 export function settleGraphLayout(graphStore: {
 	readNodes(): GraphNode[];
 	readChains(): GraphChain[];
+	readDeletions(): GraphTombstone[];
 	readPositions(): Record<string, Position>;
 	writePositions(positions: Record<string, Position>): void;
 }): void {

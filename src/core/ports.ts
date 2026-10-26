@@ -16,6 +16,7 @@ import type {
 	ChatSummary,
 	GraphChain,
 	GraphNode,
+	GraphTombstone,
 	JobKind,
 	JobRecord,
 	ExtractionRunUsage,
@@ -93,6 +94,14 @@ export interface GraphStore {
 	appendCoverage(entry: CoverageEntry): void;
 	readCoverage(): CoverageEntry[];
 
+	/** Deletion tombstones (format v3, 2026-10-26): append-only, one line per
+	 *  id the user deleted. The rewrite in rewriteLedgers is how THIS machine
+	 *  forgets; the tombstone is what makes the deletion survive a union with
+	 *  another machine's ledger (scripts/lh-sync.ts). The derivation filters
+	 *  lines created at or before the stamp. */
+	appendDeletion(tombstone: GraphTombstone): void;
+	readDeletions(): GraphTombstone[];
+
 	/** Append one cluster-naming run's usage (graph-global money channel) —
 	 *  idempotent per startedAt. */
 
@@ -125,6 +134,7 @@ export interface GraphStore {
 		chains?: GraphChain[];
 		coverage?: CoverageEntry[];
 		checkpoints?: SessionCheckpoint[];
+		deletions?: GraphTombstone[];
 	}): void;
 }
 

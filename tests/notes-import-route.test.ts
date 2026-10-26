@@ -64,6 +64,7 @@ it("real route plus in-memory ledgers and faux stages reprocess identical import
 		appendChain: (chain) => { chains.push(chain); }, readChains: () => [...chains],
 		appendCheckpoint: (checkpoint) => { checkpoints.push(checkpoint); }, readCheckpoints: () => [...checkpoints],
 		appendCoverage: () => {}, readCoverage: () => [],
+		appendDeletion: () => {}, readDeletions: () => [],
 		upsertSource: (source) => { sources.set(source.id, { ...source, extractions: sources.get(source.id)?.extractions ?? [] }); },
 		readSources: () => [...sources.values()],
 		appendSourceUsage: (id, usage) => { sources.get(id)!.extractions!.push(usage); },

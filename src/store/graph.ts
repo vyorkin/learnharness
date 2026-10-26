@@ -45,6 +45,7 @@ import type {
 	ProvenancePoint,
 	CoverageEntry,
 	SessionCheckpoint,
+	GraphTombstone,
 } from "../core/contracts.ts";
 import type { GraphStore } from "../core/ports.ts";
 
@@ -126,6 +127,12 @@ const isCheckpoint = (v: unknown): v is SessionCheckpoint =>
 const isCoverageEntry = (v: unknown): v is CoverageEntry =>
 	isRecord(v) && isString(v.chatId) && isString(v.fp) && typeof v.tokens === "number" && isString(v.foldedAt);
 
+const isGraphTombstone = (v: unknown): v is GraphTombstone =>
+	isRecord(v) &&
+	isString(v.id) &&
+	isString(v.deletedAt) &&
+	(v.reason === "chat-delete" || v.reason === "node-delete");
+
 // ─── the port implementation ────────────────────────────────────────────────
 
 export const graphStore: GraphStore = {
@@ -157,6 +164,14 @@ export const graphStore: GraphStore = {
 
 	appendCoverage(entry: CoverageEntry): void {
 		appendLine(LEDGER_FILES.coverage, entry);
+	},
+	/** Deletion tombstones — append-only, never rewritten by the destructive
+	 *  seam (a tombstone IS the permanent record of that seam's work). */
+	appendDeletion(tombstone: GraphTombstone): void {
+		appendLine(LEDGER_FILES.deletions, tombstone);
+	},
+	readDeletions(): GraphTombstone[] {
+		return readValid(LEDGER_FILES.deletions, isGraphTombstone);
 	},
 	readCoverage(): CoverageEntry[] {
 		return readValid(LEDGER_FILES.coverage, isCoverageEntry);
@@ -210,6 +225,7 @@ export const graphStore: GraphStore = {
 			chains: LEDGER_FILES.chains,
 			coverage: LEDGER_FILES.coverage,
 			checkpoints: LEDGER_FILES.sessions,
+			deletions: LEDGER_FILES.deletions,
 		} as const;
 		for (const [key, records] of Object.entries(next) as [keyof typeof files, unknown[]][]) {
 			const file = files[key];

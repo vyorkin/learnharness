@@ -435,10 +435,28 @@ export interface DerivedGraph {
  * arg_ id / premises / createdAt are the chain's identity.
  * `store events, derive state` — this is the only reader that matters.
  */
-export function getGraph(graphStore: Pick<GraphStore, "readNodes" | "readChains">): DerivedGraph {
+export function getGraph(
+	graphStore: Pick<GraphStore, "readNodes" | "readChains" | "readDeletions">,
+): DerivedGraph {
+	// DELETION TOMBSTONES (format v3, 2026-10-26): a deleted id is filtered by
+	// its stamp — every line created at or before the deletion dies, anything
+	// learned afterwards (a later createdAt) survives. This is what makes a
+	// deletion survive a union of two machines' ledgers, where the rewrite
+	// itself is invisible.
+	const cutoffs = new Map<string, string>();
+	for (const tombstone of graphStore.readDeletions()) {
+		const known = cutoffs.get(tombstone.id);
+		if (known === undefined || known < tombstone.deletedAt) cutoffs.set(tombstone.id, tombstone.deletedAt);
+	}
+	const alive = (line: { id: string; createdAt: string }): boolean => {
+		const cutoff = cutoffs.get(line.id);
+		return cutoff === undefined || line.createdAt > cutoff;
+	};
+
 	// Merge node lines by id (first line defines; later lines add phrasings).
 	const byId = new Map<string, GraphNode>();
 	for (const line of graphStore.readNodes()) {
+		if (!alive(line)) continue;
 		const existing = byId.get(line.id);
 		if (!existing) {
 			byId.set(line.id, { ...line, aliases: [...line.aliases], provenance: [...line.provenance] });
@@ -458,6 +476,7 @@ export function getGraph(graphStore: Pick<GraphStore, "readNodes" | "readChains"
 	const chains: GraphChain[] = [];
 	const byKey = new Map<string, GraphChain>();
 	for (const line of graphStore.readChains()) {
+		if (!alive(line)) continue;
 		const key = chainKey(line.premises, line.conclusion);
 		const existing = byKey.get(key);
 		if (existing) {

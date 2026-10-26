@@ -67,7 +67,21 @@ export const LEDGER_FILES = {
 	 *  the checkpoint's replacement for chat extractions — notes keep
 	 *  sessions.jsonl, whole-file as they are). */
 	coverage: path.join(PATHS.graph, "coverage.jsonl"),
+	/** Deletion tombstones (contracts/graph.ts GraphTombstone): one line per
+	 *  id a user deleted. The destructive seam still rewrites the ledgers,
+	 *  but a rewrite is invisible to a cross-machine union — the tombstone is
+	 *  what makes "deleted" survive a sync. A line's createdAt decides: the
+	 *  tombstone kills every line created at or before it, so re-learning the
+	 *  fact afterwards brings it back honestly. */
+	deletions: path.join(PATHS.graph, "deleted.jsonl"),
 } as const;
+
+/** Chat deletion tombstones (data/chats/deleted.jsonl, contracts/chat.ts
+ *  ChatTombstone): the chat adapter writes one line per deleted chat and
+ *  hides tombstoned ids on read, so a union with another machine cannot
+ *  resurrect a session the user deleted. A chat id is never reused, so a
+ *  tombstone is permanent. */
+export const CHAT_TOMBSTONES_FILE = path.join(PATHS.chats, "deleted.jsonl");
 
 /**
  * Notes-import bookkeeping (NOT a ledger): one JSON map, src-id → NotesSource
