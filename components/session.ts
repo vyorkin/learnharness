@@ -102,7 +102,7 @@ export function useChatSession({ chatId, initialMessages, initialError, initiall
 		[model],
 	);
 
-	const send = useCallback((input: ChatInput) => void model.send(input), [model]);
+	const send = useCallback((input: ChatInput) => model.send(input), [model]);
 	const continueIfOwed = useCallback((record: readonly LhMessage[]) => void model.continueIfOwed(record), [model]);
 	const steer = useCallback((text: string) => void model.steer(text), [model]);
 	const submitAnswer = useCallback(

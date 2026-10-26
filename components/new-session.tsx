@@ -12,6 +12,7 @@ import { useStrongKeyless, useZeroKeys, ZeroKeysPill } from "@/components/setup-
 import { StatsBar } from "@/components/stats-bar";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
+import { stashOpeningPrompt } from "@/components/opening-prompt";
 import type { ChatSettings, GraphSnapshot } from "@/src/core";
 
 /** The draft's pick set (owner round 10): the SAME shape the home pick
@@ -34,11 +35,13 @@ const DOCK = "mx-auto w-full max-w-[46rem] px-4";
 
 /**
  * The draft's whole behavior as one pure seam: create the session (title =
- * the first message), persist the lifted pre-chat settings, return the push
- * target — /chat/<id>?prompt=<msg> — whose initialPrompt path delivers the
- * message as turn 1. Injected fetch/router so tests pin the contract.
- * Returns null on empty text; rethrows on transport failure (the caller's
- * busy flag resets).
+ * the first message), persist the lifted pre-chat settings, stash the
+ * opening text beside the navigation, and return the push target —
+ * /chat/<id>. The chat page reads the stash and delivers it as turn 1.
+ * The text never rides the URL: a long paste exceeds Node's header limit
+ * and the window commits an empty document. Injected fetch so tests pin
+ * the contract. Returns null on empty text; rethrows on transport failure
+ * (the caller's busy flag resets).
  */
 export async function startDraftSession(
 	text: string,
@@ -64,7 +67,8 @@ export async function startDraftSession(
 	const { id } = (await res.json()) as { id: string };
 	// No settings PUT on create (per-session models, owner 2026-09-28):
 	// the SERVER stamps the newborn from the strong slot.
-	return `/chat/${id}?prompt=${encodeURIComponent(t)}`;
+	stashOpeningPrompt(id, t);
+	return `/chat/${id}`;
 }
 
 /** The pure shell (no router) — the render-test seam: the draft view's

@@ -26,6 +26,7 @@ import { Composer } from "@/components/composer";
 import { useEnterSubmits } from "@/components/enter-submits";
 import { blurAfterPointerClick } from "@/components/focus-hygiene";
 import { dockStateKey } from "@/components/dock-state-key";
+import { clearOpeningPrompt, readOpeningPrompt } from "@/components/opening-prompt";
 import { QueuedSteersBody, type QueuedSteerLine } from "@/components/queued-steers";
 import { DictationBar, finishDictation, joinDictation, useDictation } from "@/components/dictation";
 import { useFieldCycle } from "@/components/field-cycle";
@@ -250,13 +251,25 @@ export function Chat({
 
 	// New chat with a topic: send the first message exactly once
 	// (initialPromptOwed — the pure gate, pinned in the test suite).
+	// The topic arrives as the server's ?prompt= (old links) or from the
+	// sessionStorage stash the composer wrote before navigating here.
+	// The stash stays until send resolves, so a reload before the POST
+	// lands can retry. sentInitial blocks a second send on this mount.
 	const sentInitial = useRef(false);
 	useEffect(() => {
-		if (!sentInitial.current && initialPromptOwed(initialMessages, initialPrompt)) {
+		const prompt = initialPrompt || readOpeningPrompt(chatId);
+		if (!sentInitial.current && prompt && initialPromptOwed(initialMessages, prompt)) {
 			sentInitial.current = true;
-			void send({ type: "text", text: initialPrompt! });
+			void send({ type: "text", text: prompt }).then(
+				(landed) => {
+					if (landed) clearOpeningPrompt(chatId);
+				},
+				() => {
+					/* leave the stash: the next mount retries */
+				},
+			);
 		}
-	}, [initialPrompt, initialMessages, send]);
+	}, [chatId, initialPrompt, initialMessages, send]);
 
 	// A turn running server-side, attached to no live view of ours (navigate
 	// away mid-turn, or a wake turn discovered mid-session): the reattach
@@ -1758,7 +1771,8 @@ export function Chat({
  *  2026-10-02 abort chain proper (question before turn). */
 export type EscAbortTarget = "mermaid" | "plan" | "setup" | "question" | "problem" | "turn" | null;
 	/**
- * Does the ?prompt topic still owe its first send? The gate is "no real
+ * Does the opening topic still owe its first send? The topic is the
+ * server's ?prompt= or the sessionStorage stash. The gate is "no real
  * conversation yet" (no user/assistant message) — NOT emptiness: a
  * session started with map picks carries a graph-context MARKER as
  * message[0], and that scaffolding must never swallow the first send

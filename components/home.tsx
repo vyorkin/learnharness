@@ -12,6 +12,7 @@ import { DictationBar, joinDictation, useDictation } from "@/components/dictatio
 import { useFieldCycle } from "@/components/field-cycle";
 import { SidebarToggle } from "@/components/sidebar";
 import { StatsBar } from "@/components/stats-bar";
+import { stashOpeningPrompt } from "@/components/opening-prompt";
 import type { TurnUsage } from "@/src/core";
 
 /**
@@ -150,7 +151,10 @@ export function Home({
 			// No settings PUT on create (per-session models, owner
 			// 2026-09-28): the SERVER stamps the newborn from the strong
 			// slot — the same default this surface's model control edits.
-			router.push(`/chat/${id}?prompt=${encodeURIComponent(t)}`);
+			// The opening text stays out of the URL (opening-prompt.ts):
+			// a long paste as ?prompt= is a 431 and a blank window.
+			stashOpeningPrompt(id, t);
+			router.push(`/chat/${id}`);
 		} catch {
 			setBusy(false);
 		}
