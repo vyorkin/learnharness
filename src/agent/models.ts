@@ -48,6 +48,17 @@ export interface PiEngine {
 
 export type { ThinkingLevel };
 
+/** Per-call output ceiling (LH_MAX_OUTPUT_TOKENS, default 32k). Models like
+ *  DeepSeek V4 advertise a 384k output budget; a runaway reply is the one
+ *  cost a prefix cache cannot discount (output is billed at the full rate on
+ *  every call). 32k tokens is far above any teaching message or plan while
+ *  keeping a single call's worst case in cents. Raise it for a session that
+ *  genuinely needs a longer artifact. */
+const MAX_OUTPUT_TOKENS = (() => {
+	const raw = Number(process.env.LH_MAX_OUTPUT_TOKENS ?? 32_768);
+	return Number.isFinite(raw) && raw > 0 ? Math.max(1_024, Math.floor(raw)) : 32_768;
+})();
+
 let collection: ReturnType<typeof createModels> | undefined;
 
 /** The process-wide pi-ai Models collection — EVERY builtin provider's
@@ -120,7 +131,16 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 		streamFn: (requestModel, context, options) => {
 			const purpose = typeof background === "function" ? background : () => background;
 			const stream = spec.provider === "chatgpt" ? chatGPTStream(purpose, lifecycle) : nativeId ? nativeSubscriptionStream(models.getProvider(nativeId)!, purpose, lifecycle) : models.streamSimple.bind(models);
-			return stream(requestModel, context, { ...options, reasoning: level === "off" ? undefined : level });
+			// Output ceiling for native API routes (subscription streams own
+			// their own limits). The agent loop usually leaves maxTokens unset,
+			// which would let the provider spend its full 384k output budget.
+			const nativeRoute = spec.provider !== "chatgpt" && !nativeId;
+			const maxTokens = Math.min(options?.maxTokens ?? MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS);
+			return stream(requestModel, context, {
+				...options,
+				...(nativeRoute ? { maxTokens } : {}),
+				reasoning: level === "off" ? undefined : level,
+			});
 		},
 	};
 }
