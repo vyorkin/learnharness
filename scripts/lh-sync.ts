@@ -154,11 +154,17 @@ function writeBundle(dir: string, bundle: SyncBundle): string[] {
 	const graph = path.join(dir, "graph");
 	const chatsDir = path.join(dir, "chats");
 	const written: string[] = [];
-	writeIfChanged(path.join(graph, "nodes.jsonl"), jsonl(bundle.nodes), written);
-	writeIfChanged(path.join(graph, "chains.jsonl"), jsonl(bundle.chains), written);
-	writeIfChanged(path.join(graph, "coverage.jsonl"), jsonl(bundle.coverage), written);
-	writeIfChanged(path.join(graph, "sessions.jsonl"), jsonl(bundle.checkpoints), written);
-	writeIfChanged(path.join(graph, "deleted.jsonl"), jsonl(bundle.deletions), written);
+	// An empty collection never CREATES a ledger: a family that has never
+	// emitted something must stay "nothing yet", not gain an empty file.
+	const writeLedger = (file: string, body: string): void => {
+		if (body === "" && !fs.existsSync(file)) return;
+		writeIfChanged(file, body, written);
+	};
+	writeLedger(path.join(graph, "nodes.jsonl"), jsonl(bundle.nodes));
+	writeLedger(path.join(graph, "chains.jsonl"), jsonl(bundle.chains));
+	writeLedger(path.join(graph, "coverage.jsonl"), jsonl(bundle.coverage));
+	writeLedger(path.join(graph, "sessions.jsonl"), jsonl(bundle.checkpoints));
+	writeLedger(path.join(graph, "deleted.jsonl"), jsonl(bundle.deletions));
 	writeIfChanged(
 		path.join(graph, "positions.json"),
 		JSON.stringify({ positions: bundle.positions, updatedAt: bundle.positionsUpdatedAt ?? new Date().toISOString() }, null, "\t"),

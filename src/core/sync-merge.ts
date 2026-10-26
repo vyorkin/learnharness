@@ -293,10 +293,13 @@ export function mergeBundles(local: SyncBundle, incoming: SyncBundle): SyncResul
 		incomingPositionsStamp > localPositionsStamp ? incoming.positionsUpdatedAt : local.positionsUpdatedAt;
 	report.positionsFrom = incomingPositionsStamp > localPositionsStamp ? "incoming" : "local";
 
-	const renderSettings =
-		incoming.renderSettings === undefined || incoming.renderSettings === null ? local.renderSettings : incoming.renderSettings;
-	report.renderSettingsFrom =
-		incoming.renderSettings === undefined || incoming.renderSettings === null ? "local" : "incoming";
+	// render-settings carries no stamp of its own, so it does NOT take the
+	// peer's copy on every sync (that would silently overwrite a local UI
+	// preference): the local blob wins, and the incoming one only fills an
+	// empty side.
+	const takeIncomingRenderSettings = local.renderSettings === undefined || local.renderSettings === null;
+	const renderSettings = takeIncomingRenderSettings ? incoming.renderSettings : local.renderSettings;
+	report.renderSettingsFrom = takeIncomingRenderSettings ? "incoming" : "local";
 
 	const merged = mergeSources(local.sources, incoming.sources);
 	report.sources = merged.added;

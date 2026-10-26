@@ -214,6 +214,20 @@ describe("the merge engine (pure)", () => {
 		);
 	});
 
+	it("keeps the local render-settings (no stamp, so a sync must not overwrite a UI preference)", () => {
+		const local = emptyBundle();
+		const incoming = emptyBundle();
+		local.renderSettings = { nodeSize: 2 };
+		incoming.renderSettings = { nodeSize: 9 };
+		const { bundle, report } = mergeBundles(local as never, incoming as never);
+		assert.equal(report.renderSettingsFrom, "local");
+		assert.deepEqual(bundle.renderSettings, { nodeSize: 2 });
+		// An empty local side takes the incoming blob.
+		const empty = emptyBundle();
+		const filled = mergeBundles(empty as never, incoming as never);
+		assert.equal(filled.report.renderSettingsFrom, "incoming");
+	});
+
 	it("takes positions last-write-wins and drops chats tombstoned on either side", () => {
 		const local = emptyBundle();
 		const incoming = emptyBundle();
