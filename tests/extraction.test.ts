@@ -1148,7 +1148,9 @@ describe("message anchors (session propositions carry their passage's id)", () =
 			// own turn budget, not the auditor's).
 			auditor: fauxEngine([passThroughAuditStep(), passThroughAuditStep()]),
 		});
-		assert.deepEqual(await pipeline.runExtraction(chatId), { nodes: 2, chains: 0 });
+		// Content-addressed identity (2026-10-26): both batches submit the same
+		// statements, so they land on ONE id — one emission, two anchored lines.
+		assert.deepEqual(await pipeline.runExtraction(chatId), { nodes: 1, chains: 0 });
 		const anchors = ledgers.readNodes().map((n) => n.provenance[0]!.messageId).sort();
 		assert.deepEqual(anchors, ["a2", "a4"], "each job's node anchors INSIDE its own batch — never a5");
 		assert.equal(ledgers.readCoverage().length, 5, "both batches checkpointed");
@@ -1213,7 +1215,10 @@ describe("message anchors (session propositions carry their passage's id)", () =
 			extractor: submitModel("submit_findings", stray),
 			auditor: submitModel("submit_review", { links: [] }),
 		});
-		assert.deepEqual(await second.importNotes({ filePath: "/vault/stray-anchor.md", text: NOTES_TEXT }), { nodes: 1, chains: 0 });
+		// The same statement again: content-addressed identity merges it as a
+		// link-append, so the second import emits no NEW node — the interesting
+		// assertion below is that its append line stays anchor-free.
+		assert.deepEqual(await second.importNotes({ filePath: "/vault/stray-anchor.md", text: NOTES_TEXT }), { nodes: 0, chains: 0 });
 		const secondSource = ledgers.readSources()[1]!;
 		const strayNode = ledgers.readNodes().find((n) => n.provenance.some((pt) => pt.chatId === secondSource.id))!;
 		assert.deepEqual(strayNode.provenance, [{ chatId: secondSource.id, messageId: "" }], "the stray anchor was stripped before the merger");
@@ -1565,11 +1570,12 @@ describe("the notes front door (importNotes — format-agnostic)", () => {
 		assert.ok(calls >= 2, `expected ≥2 extractor calls, got ${calls}`);
 		assert.match(views[0]!, new RegExp(`part 1/${calls}`));
 		assert.match(views.at(-1)!, new RegExp(`part ${calls}/${calls}`));
-		// Same findings in every chunk → one node PER CHUNK: jobs merge
-		// independently (owner, 2026-09-29 — the mappings ledger is gone);
-		// cross-chunk identity is the auditor's linkTo verdict, and these
-		// fixtures submit none.
-		assert.deepEqual(stats, { nodes: calls, chains: 0 });
+		// Same findings in every chunk → ONE identity across the whole file
+		// (content-addressed ids, 2026-10-26 — supersedes the 2026-09-29
+		// "one node per chunk": cross-chunk identity is the statement hash now,
+		// not only the auditor's linkTo verdict). Each chunk still appends its
+		// own line, so the ledger grows by one line per chunk.
+		assert.deepEqual(stats, { nodes: 1, chains: 0 });
 		assert.equal(ledgers.readNodes().length, calls);
 	});
 
@@ -1618,18 +1624,22 @@ describe("the notes front door (importNotes — format-agnostic)", () => {
 		// A legacy stamp must never suppress an explicit import.
 		ledgers.upsertSource({ ...ledgers.readSources()[0]!, contentFp: createHash("sha256").update(NOTES_TEXT).digest("hex").slice(0, 16) });
 		const second = await mk().importNotes({ filePath: "/vault/learn vim.md", text: NOTES_TEXT });
-		assert.deepEqual(second, { nodes: 1, chains: 0 }, "identical content re-extracts");
+		// The re-import really re-extracts (that is this test's point): the
+		// second run merges the same statements as a link-append, so it emits
+		// no NEW identity (content-addressed ids, 2026-10-26).
+		assert.deepEqual(second, { nodes: 0, chains: 0 }, "identical content re-extracts, and re-merges onto one identity");
 		assert.equal(ledgers.readSources()[0]!.contentFp, undefined, "new imports write no fingerprint");
 
 		assert.equal(ledgers.readSources().length, 1, "one source identity — the path hashes to the same id");
 		assert.equal(ledgers.readSources()[0]!.extractions?.length, 2, "both runs bill usage");
-		assert.equal(ledgers.readNodes().length, 2, "the auditor, not a content skip, owns identity");
+		assert.equal(ledgers.readNodes().length, 2, "two append lines...");
+		assert.equal(new Set(ledgers.readNodes().map((n) => n.id)).size, 1, "...for ONE identity");
 
 		// Changed text also re-runs the whole file.
 		const third = await mk().importNotes({ filePath: "/vault/learn vim.md", text: `${NOTES_TEXT}\nA new closing line.` });
-		assert.deepEqual(third, { nodes: 1, chains: 0 }, "changed content re-extracts");
+		assert.deepEqual(third, { nodes: 0, chains: 0 }, "changed content re-extracts; the same findings merge onto their ids");
 		assert.equal(ledgers.readSources()[0]!.extractions?.length, 3, "the re-run bills its usage");
-		assert.equal(ledgers.readNodes().length, 3);
+		assert.equal(ledgers.readNodes().length, 3, "a third append line, still one identity");
 	});
 
 	it("aborts like a chat run: true cancellation, nothing merged, partial usage in the source record", async () => {
@@ -1757,11 +1767,11 @@ describe("the chunked pipeline (extraction coverage)", () => {
 		assert.match(views[1]!, /^TEACHER \[a5\] topic 5:/m);
 
 		// Batch 1 merged the full findings (verdicts-only: the extractor's
-		// output always fully merges); batch 2's identical ids are a
-		// SEPARATE job's namespace (owner, 2026-09-29 — no mapping table)
-		// — its propositions merge again as fresh nodes. Cross-batch
-		// identity is the auditor's linkTo verdict, never the merger's.
-		assert.deepEqual(stats, { nodes: 4, chains: 2 });
+		// output always fully merges); batch 2 submits the SAME statements, so
+		// they resolve to the same content-addressed ids and append link-style
+		// lines instead of twins (2026-10-26 — supersedes the 2026-09-29
+		// per-job-namespace ruling). Each batch still checkpoints its coverage.
+		assert.deepEqual(stats, { nodes: 2, chains: 1 });
 
 		// Per-batch coverage: every message checkpointed, nothing legacy.
 		const coverage = ledgers.readCoverage();
@@ -2007,11 +2017,12 @@ describe("per-chunk parallel jobs (owner, 2026-09-28)", () => {
 		// the 3-permit semaphore still caps those.)
 		assert.equal(extractPeak, 1, "one source, one extract at a time — strict order");
 		assert.equal(auditPeak, 1, "audits serialize behind the gate — never two at once");
-		// Identical findings in every chunk, one merge PER chunk (jobs are
-		// independent — owner, 2026-09-29): 8 chunks × 2 propositions,
-		// 8 × 1 chain. The auditor's links, not the merger, dedupe identity.
-		assert.deepEqual(stats, { nodes: 16, chains: 8 });
-		assert.equal(ledgers.readNodes().length, 16);
+		// Identical findings in every chunk: 8 chunks × 2 propositions all land
+		// on the same TWO content-addressed ids (2026-10-26), and every chunk
+		// still appends its own lines — 8 × 2 node lines, 8 × 1 chain line.
+		assert.deepEqual(stats, { nodes: 2, chains: 1 });
+		assert.equal(ledgers.readNodes().length, 16, "one append line per proposition per chunk");
+		assert.equal(new Set(ledgers.readNodes().map((node) => node.id)).size, 2, "two identities");
 	});
 });
 
@@ -2230,7 +2241,7 @@ describe("digest-aware serialized extraction (the extractor is the assembler)", 
 		});
 		const stats = await pipeline.runExtraction(chatId);
 		assert.deepEqual(events, ["extract1", "audit1", "extract2", "audit2"], "strict per-source order: extract → audit → merge → NEXT extract");
-		assert.equal(stats.nodes, 4, "both batches merged (2 propositions each)");
+		assert.equal(stats.nodes, 2, "both batches merged; their identical propositions share 2 content-addressed ids");
 	});
 });
 
@@ -2374,7 +2385,8 @@ describe("notes import completion and retry reliability", () => {
 				return fauxAssistantMessage([fauxToolCall("submit_findings", NOTES_FINDINGS as unknown as ToolCall["arguments"])], { stopReason: "toolUse" });
 			}]),
 		});
-		await assert.rejects(pipeline.importNotes({ ...input, text: "first chunk\nsecond chunk\nthird chunk" }), incomplete("partial", 2));
+		// chunks 1 and 3 merge the SAME findings: one identity, two append lines
+		await assert.rejects(pipeline.importNotes({ ...input, text: "first chunk\nsecond chunk\nthird chunk" }), incomplete("partial", 1));
 		assert.equal(calls, 3);
 		assert.equal(ledgers.readNodes().length, 2);
 		assert.equal(ledgers.readSources()[0]!.extractions?.length, 3);
@@ -2426,7 +2438,14 @@ describe("notes import completion and retry reliability", () => {
 		assert.equal(ledgers.readNodes().length, abortAt - 1, "earlier graph merges retained");
 		assert.equal(ledgers.readSources()[0]!.extractions?.length, abortAt - 1, "earlier usage retained");
 		assert.equal(extractionStatuses().length, 0, "cancelled job row removed");
-		assert.deepEqual(await make(ledgers).importNotes(wholeFile), { nodes: 1, chains: 0 }, "source exclusion released for an explicit unchanged whole-file retry");
+		// Content-addressed identity (2026-10-26): what the retry re-extracts merges
+		// onto the ids the aborted run already minted, so only a run that merged
+		// NOTHING before its abort adds identities on the retry.
+		assert.deepEqual(
+			await make(ledgers).importNotes(wholeFile),
+			{ nodes: abortAt === 1 ? 1 : 0, chains: 0 },
+			"the source exclusion is released for an explicit unchanged whole-file retry",
+		);
 		assert.equal(ledgers.readSources()[0]!.extractions?.length, abortAt);
 	});
 
@@ -2442,12 +2461,13 @@ describe("notes import completion and retry reliability", () => {
 			engineFor: (role) => role === "auditor" ? submitModel("submit_review", NOTES_VERDICT) : submitModel("submit_findings", NOTES_FINDINGS, () => { calls++; }),
 		});
 		await assert.rejects(pipeline.importNotes({ ...input, text: "first chunk\nsecond chunk\nthird chunk" }), (error) => {
-			incomplete("partial", 3)(error);
+			// Three chunks, identical findings: ONE identity, appended three times
+			incomplete("partial", 1)(error);
 			assert.match((error as NotesImportError).message, /synthetic isolated usage failure/);
 			return true;
 		});
 		assert.equal(calls, 3, "ordinary cleanup failure does not imply cancellation");
-		assert.equal(ledgers.readNodes().length, 3);
+		assert.equal(ledgers.readNodes().length, 3, "three append lines, one identity");
 		assert.equal(ledgers.readSources()[0]!.extractions?.length, 2);
 	});
 
@@ -2466,7 +2486,9 @@ describe("notes import completion and retry reliability", () => {
 			assert.deepEqual(ledgers.readSources(), sourceBefore);
 		} finally { release(); }
 		await first;
-		assert.deepEqual(await make(ledgers).importNotes(input), { nodes: 1, chains: 0 }, "lock released after lifecycle");
+		// Same text again: the lock is released (the run happens) and the
+		// statements re-merge onto the identity the first run minted.
+		assert.deepEqual(await make(ledgers).importNotes(input), { nodes: 0, chains: 0 }, "lock released after lifecycle");
 		assert.equal(ledgers.readSources()[0]!.extractions?.length, 2);
 	});
 

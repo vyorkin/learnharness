@@ -49,7 +49,7 @@
  * the composition root (src/server/stores.ts) wires the fs adapters in.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { CoverageEntry,
 } from "./contracts/graph.ts";
 import type {
@@ -75,20 +75,45 @@ export interface GraphDeps {
 	graphStore: GraphStore;
 }
 
-/** "n_" + 12 hex chars (contracts.ts GraphNode.id — store-assigned). */
-function newGraphNodeId(): string {
-	return `n_${randomBytes(6).toString("hex")}`;
+/**
+ * CONTENT-ADDRESSED IDENTITY (2026-10-26, cross-machine sync): a node's id is
+ * derived from its statement and a chain's from its (premises, conclusion)
+ * key, so the SAME fact minted on two machines lands on the SAME id and a
+ * union of the ledgers is idempotent. The alternative — random ids plus a
+ * semantic reconcile pass — was rejected as the primary mechanism: it costs
+ * tokens, is non-deterministic, and still cannot merge two machines' copies
+ * of one argument before an LLM has spoken.
+ *
+ * 16 hex chars (64 bits), deliberately wider than the historical 12: a
+ * collision (two different statements hashing to one id) would be silently
+ * wrong, and at 64 bits the birthday bound stays negligible for any graph a
+ * human teaches, so no collision-extension logic is needed. A collision is
+ * therefore treated as an error the migration reports, never guessed around.
+ */
+const ID_HEX_CHARS = 16;
+
+/** The identity material of a statement: unicode-folded, whitespace-collapsed,
+ *  lowercased. Two phrasings that differ only by case or spacing ARE one
+ *  proposition; the first line's original statement still stands at read time,
+ *  and the other joins `aliases` like any other phrasing. */
+export function normalizeStatement(statement: string): string {
+	return statement.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-/** "arg_" + 12 hex chars — the implication-node namespace (a chain's id
- *  IS its derived node's id; collision-free with n_ by construction). */
-function newGraphChainId(): string {
-	return `arg_${randomBytes(6).toString("hex")}`;
+/** "n_" + 16 hex chars of the normalized statement's sha256. */
+export function nodeIdForStatement(statement: string): string {
+	return `n_${createHash("sha256").update(normalizeStatement(statement)).digest("hex").slice(0, ID_HEX_CHARS)}`;
+}
+
+/** "arg_" + 16 hex chars of the chain key — the implication-node namespace
+ *  (a chain's id IS its derived node's id; collision-free with n_). */
+export function chainIdForKey(key: string): string {
+	return `arg_${createHash("sha256").update(key).digest("hex").slice(0, ID_HEX_CHARS)}`;
 }
 
 /** A chain's merge key: sorted premises + conclusion — the identity an
  *  assertion re-stating the same argument merges under. */
-function chainKey(premises: ReadonlyArray<string>, conclusion: string): string {
+export function chainKey(premises: ReadonlyArray<string>, conclusion: string): string {
 	return `${[...premises].sort().join("+")}>${conclusion}`;
 }
 
@@ -194,18 +219,26 @@ export function mergeFindings(
 				provenance: points,
 			});
 		} else {
-			const node: GraphNode = {
-				id: newGraphNodeId(),
+			const id = nodeIdForStatement(p.statement);
+			// Content-addressed identity: the same statement minted twice
+			// resolves to the SAME id, so a re-encounter the auditor failed to
+			// link still lands as a link-style append (phrasings + provenance
+			// union at read time) instead of a twin node. Stats count new
+			// identities only — an append under a known id is not an emission.
+			const reused = existingIds.has(id);
+			ledgers.appendNode({
+				id,
 				name: p.name,
 				statement: p.statement,
 				aliases: [...p.aliases],
 				createdAt: now,
 				provenance: points,
-			};
-			ledgers.appendNode(node);
-			stats.nodes++;
-			graphNodeId = node.id;
-			existingIds.add(graphNodeId);
+			});
+			if (!reused) {
+				stats.nodes++;
+				existingIds.add(id);
+			}
+			graphNodeId = id;
 		}
 		mapping.set(p.id, graphNodeId);
 	}
@@ -246,7 +279,7 @@ export function mergeFindings(
 		if (premises.length === 0) return; // a chain IS an argument — bare propositions ride the node ledger alone
 		const key = chainKey(premises, conclusion);
 		if (assertedByChat.has(key)) return; // this chat already asserted this argument
-		const id = idOfKey.get(key) ?? newGraphChainId();
+		const id = idOfKey.get(key) ?? chainIdForKey(key);
 		ledgers.appendChain({ id, premises, conclusion, createdAt: now, provenance: pointOf(chatId) });
 		idOfKey.set(key, id);
 		assertedByChat.add(key);

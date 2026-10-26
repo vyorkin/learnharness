@@ -361,11 +361,11 @@ describe("the merger (mergeFindings)", () => {
 		assert.deepEqual(chains[0]!.provenance, [{ chatId: chat.id, messageId: "" }], "chains stay chat-level — never anchored");
 	});
 
-	it("merges INDEPENDENTLY per call — no cross-run identity (owner, 2026-09-29)", () => {
-		// The mappings ledger is gone: resolution is a job-local in-memory
-		// map, so a second merge of the same verdicts knows nothing of the
-		// first. Cross-run identity is the AUDITOR's job (linkTo) plus the
-		// coverage ledger (nothing re-extracts) — never the merger's.
+	it("converges across runs — the same facts land on the same ids (content-addressed identity, 2026-10-26)", () => {
+		// SUPERSEDES the 2026-09-29 "no cross-run identity" ruling: that ruling
+		// existed because ids were random, so a second merge could not know the
+		// first. Ids are now derived from the statements, so the merger converges
+		// on its own — the auditor's linkTo is for PARAPHRASES, not repeats.
 		// (Own chat + unique statements — this suite stacks on shared
 		// files, so nothing here may touch the other tests' counts.)
 		const rep = fixtureChat("Independence fixture", [user("u1", "rep")].flat());
@@ -379,11 +379,16 @@ describe("the merger (mergeFindings)", () => {
 		const first = mergeFindings(rep.id, findings, { links: [] }, graphDeps, sessionSource(rep.id));
 		assert.deepEqual(first, { nodes: 2, chains: 1 });
 		const second = mergeFindings(rep.id, findings, { links: [] }, graphDeps, sessionSource(rep.id));
-		assert.deepEqual(second, { nodes: 2, chains: 1 }, "nothing remembered — everything re-creates");
+		assert.deepEqual(
+			second,
+			{ nodes: 0, chains: 0 },
+			"the same statements hash to the same ids: no new emission, and this chat already asserted the chain",
+		);
 		const graph = scopedGraph([rep.id]);
-		assert.equal(graph.nodes.length, 4, "the propositions merge again as fresh nodes");
-		assert.equal(graph.chains.length, 2, "fresh endpoints — fresh chain assertions");
-		// exactly one checkpoint line per merge, though — checkpoints are a log
+		assert.equal(graph.nodes.length, 2, "two identities, not four");
+		assert.equal(graph.chains.length, 1, "one logical argument, re-stated by one chat");
+		// the merges still append: two node lines each + two checkpoints
+		assert.equal(graphStore.readNodes().filter((n) => n.statement === "Independence one statement").length, 2);
 		assert.equal(graphStore.readCheckpoints().filter((c) => c.chatId === rep.id).length, 2);
 	});
 
@@ -550,9 +555,11 @@ describe("the merger (mergeFindings)", () => {
 		assert.deepEqual(snap.nodeSessions[idByStatement.get("Gamma application")!], [chat1.id]);
 	});
 
-	it("never string-matches without a verdict — an identical statement without linkTo is a NEW node", () => {
+	it("an identical statement without a verdict IS the same node (content-addressed identity, 2026-10-26)", () => {
 		const chat3 = fixtureChat("Graph fixture 3", [user("u1", "third")].flat());
 		chat3Id = chat3.id;
+		const beforeLine = getGraph(graphStore).nodes.find((n) => n.statement === "Alpha intuition")!;
+		const linesBefore = graphStore.readNodes().filter((line) => line.id === beforeLine.id).length;
 		const stats = mergeFindings(
 			chat3.id,
 			{
@@ -566,13 +573,19 @@ describe("the merger (mergeFindings)", () => {
 				],
 				chains: [],
 			},
-			// empty verdicts — identity is the auditor's call alone
+			// empty verdicts — nothing told the merger where to link
 			{ links: [] },
 			graphDeps,
 			sessionSource(chat3.id),
 		);
-		assert.equal(stats.nodes, 1, "created — the merger does not match strings");
-		assert.equal(getGraph(graphStore).nodes.filter((n) => n.statement === "Alpha intuition").length, 2);
+		assert.equal(stats.nodes, 0, "no new identity — the statement hashes to the existing node's id");
+		const surviving = getGraph(graphStore).nodes.filter((n) => n.statement === "Alpha intuition");
+		assert.equal(surviving.length, 1, "one node, never a twin");
+		assert.equal(
+			graphStore.readNodes().filter((line) => line.id === beforeLine.id).length,
+			linesBefore + 1,
+			"the re-encounter appends a link-style line (aliases + provenance union at read time)",
+		);
 	});
 
 	it("merges the notes front door: source id as chatId, checkpoint at import time", () => {
@@ -673,6 +686,17 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 	 *  aliases stripped — the identity stays), kill Y (orphan), keep Z and
 	 *  dB's edge, kill dA's coverage/checkpoints. */
 	function buildTwoSessionScenario() {
+		// Per-scenario statement tag: ids are content-addressed now, so two
+		// scenarios asserting literally the same sentence would share ONE node
+		// (correct behaviour, wrong fixture — this suite stacks on shared
+		// ledgers and each scenario must own its identities).
+		const tag = `[${Math.random().toString(36).slice(2, 8)}]`;
+		const stmts = {
+			x: `Shared core statement ${tag}`,
+			y: `Solo fact statement ${tag}`,
+			yPhrase: `Shared core, rephrased ${tag}`,
+			z: `B extra statement ${tag}`,
+		};
 		const dA = fixtureChat("Deletion session A", [
 			user("du1", "teach me the deletion topic"),
 			assistant("da1", [
@@ -685,8 +709,8 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 		].flat());
 		const findingsA: SessionFindings = {
 			propositions: [
-				{ id: "p1", name: "Shared core", statement: "Shared core statement", aliases: ["shared feel"], },
-				{ id: "p2", name: "Solo fact", statement: "Solo fact statement", aliases: ["solo feel"], },
+				{ id: "p1", name: "Shared core", statement: stmts.x, aliases: ["shared feel"], },
+				{ id: "p2", name: "Solo fact", statement: stmts.y, aliases: ["solo feel"], },
 			],
 			chains: [{ premises: ["p1"], conclusion: "p2", }],
 		};
@@ -695,8 +719,8 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 		// holds lookalike statements from earlier tests, so scope by chat.
 		const bornOf = (chatId: string, statement: string): string =>
 			getGraph(graphStore).nodes.find((n) => n.statement === statement && n.provenance.some((pt) => pt.chatId === chatId))!.id;
-		const xId = bornOf(dA.id, "Shared core statement");
-		const yId = bornOf(dA.id, "Solo fact statement");
+		const xId = bornOf(dA.id, stmts.x);
+		const yId = bornOf(dA.id, stmts.y);
 
 		const dB = fixtureChat("Deletion session B", [
 			user("eu1", "more on the shared core"),
@@ -710,13 +734,13 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 		].flat());
 		const findingsB: SessionFindings = {
 			propositions: [
-				{ id: "q1", name: "Shared again", statement: "Shared core, rephrased", aliases: ["B phrasing"] },
-				{ id: "q2", name: "B extra", statement: "B extra statement", aliases: ["b extra feel"], },
+				{ id: "q1", name: "Shared again", statement: stmts.yPhrase, aliases: ["B phrasing"] },
+				{ id: "q2", name: "B extra", statement: stmts.z, aliases: ["b extra feel"], },
 			],
 			chains: [{ premises: ["q1"], conclusion: "q2", }],
 		};
 		mergeFindings(dB.id, findingsB, { links: [{ id: "q1", linkTo: xId }] }, graphDeps, sessionSource(dB.id));
-		const zId = bornOf(dB.id, "B extra statement");
+		const zId = bornOf(dB.id, stmts.z);
 
 		// Coverage rows (both chats) + positions garnish — the deletion
 		// prunes both ledgers.
@@ -726,11 +750,11 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 			}
 		}
 		graphStore.writePositions({ ...graphStore.readPositions(), [xId]: { x: 1, y: 1 }, [yId]: { x: 2, y: 2 }, [zId]: { x: 3, y: 3 } });
-		return { dA, dB, xId, yId, zId };
+		return { dA, dB, xId, yId, zId, stmts };
 	}
 
 	it("delete-nodes: the shared node survives with the other session's content; the orphan dies; the creator's aliases are stripped (owner ruling 2026-09-23)", () => {
-		const { dA, dB, xId, yId, zId } = buildTwoSessionScenario();
+		const { dA, dB, xId, yId, zId, stmts } = buildTwoSessionScenario();
 		const zLineBefore = JSON.stringify(graphStore.readNodes().find((n) => n.id === zId));
 
 		const stats = deleteChatTraces(graphStore, dA.id, "delete-nodes");
@@ -745,10 +769,10 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 		// X survives: identity (name/statement/createdAt from the create
 		// line) intact, dA's aliases + provenance gone, dB's phrasings in.
 		const x = graph.nodes.find((n) => n.id === xId)!;
-		assert.equal(x.statement, "Shared core statement", "the shared identity survives");
+		assert.equal(x.statement, stmts.x, "the shared identity survives");
 		assert.equal(x.name, "Shared core");
 		assert.ok(!x.aliases.includes("shared feel"), "the deleted creator's phrasings are stripped (owner ruling)");
-		assert.ok(x.aliases.includes("B phrasing") && x.aliases.includes("Shared core, rephrased"));
+		assert.ok(x.aliases.includes("B phrasing") && x.aliases.includes(stmts.yPhrase));
 		assert.deepEqual(x.provenance, [{ chatId: dB.id, messageId: "" }], "only dB's provenance remains");
 		// Y (the orphan) is gone entirely.
 		assert.equal(graph.nodes.some((n) => n.id === yId), false);

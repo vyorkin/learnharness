@@ -119,8 +119,13 @@ export interface NamingRunStats {
 }
 
 /** The graph-family format version this build writes and understands
- *  (the format.json sidecar — src/store/graph-format.ts). */
-export const CURRENT_GRAPH_FORMAT_VERSION = 1;
+ *  (the format.json sidecar — src/store/graph-format.ts).
+ *
+ *  v2 (2026-10-26): CONTENT-ADDRESSED IDS — node ids are derived from the
+ *  normalized statement and chain ids from the (premises, conclusion) key
+ *  (core/graph.ts), so two machines' ledgers union idempotently. v1 data is
+ *  still READ (ids are opaque); scripts/migrate-hash-ids.ts rewrites it. */
+export const CURRENT_GRAPH_FORMAT_VERSION = 2;
 
 
 export interface GraphNode {

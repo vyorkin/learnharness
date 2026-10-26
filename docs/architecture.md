@@ -333,6 +333,8 @@ Sub-agents **verify, never one-shot**: the demo-builder headlessly executes its 
 
 ## 6. The knowledge graph — two channels, one writer
 
+**Content-addressed identity — graph format v2** (owner ruling, 2026-10-26): a node's id is `n_` + 16 hex chars of `sha256(normalize(statement))` and a chain's id is `arg_` + 16 hex chars of `sha256(chainKey)` (`nodeIdForStatement` / `chainIdForKey` in `core/graph.ts`). `normalize` is NFKC + whitespace-collapse + lowercase, so case and spacing are not identity. This SUPERSEDES the 2026-09-28/29 "identity is the auditor's judgment alone, never string matching" ruling for exact repeats: two sightings of one sentence now resolve to one id by construction, whether they arrive from two chats, two sub-agent jobs, or two machines (the merger appends a link-style line instead of a twin). The auditor still owns PARAPHRASES — its link-or-create verdict is the only thing that merges differently-worded claims — and the hidden heuristic did not return: the merger matches normalized statements, nothing fuzzier. 64 bits of digest, deliberately wider than the historical 48, make collisions negligible; a collision is a migration-time ABORT, never an extension guess. `graph/format.json` is stamped v2; `scripts/migrate-hash-ids.ts` rewrites v1 ledgers (ids, chain endpoints, position keys) and is idempotent. Motivation: a cross-machine sync is a union of the append-only ledgers, and only content-addressed ids make that union idempotent for repeats without paying an LLM to reconcile them.
+
 **The extraction pipeline is the sole graph writer.** Nothing else appends to `data/graph/*.jsonl` — not the teacher, not the server, not a migration script. (The one sanctioned exception: `PUT /api/graph/positions` writes layout positions only, sanitized, with an incremental layout settle when the graph grew. Backfill scripts bypass this by design, as one-time operations.)
 
 ```mermaid
@@ -559,6 +561,7 @@ Each of these was implemented, lived in real data, and was replaced; the replace
 | sigma.js + graphology + forceAtlas2 + Louvain clustering | Hand-rolled Canvas 2D renderer, d3-force layout, embedding-based agglomerative clusters | 2026-09-13 era |
 | Vercel AI SDK LLM loop (`MockLanguageModelV4` tests) | pi-ai engine (faux-provider tests), AI SDK kept as the UIMessage protocol | pi-engine-swap |
 | Problem-set practice (`PracticeStore`, `/api/practice`, `practice-pipeline.ts`, `/practice` page) | Practice as a `kind: "practice"` chat session with `problem`/`conclude` tools | 2026-10-04 |
+| Random node/chain ids + identity exclusively the auditor's ("never string-matches") | Content-addressed ids (normalized-statement hash; chainKey hash) — format v2; the auditor keeps paraphrases | 2026-10-26 |
 
 ## 14. Deliberately deferred
 
