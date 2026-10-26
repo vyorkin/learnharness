@@ -5,13 +5,32 @@ import { normalizeOptions, type QuestionAnswerData } from "./question-core.ts";
 import { parseAskInput, parseExplainInput, parseQuizInput } from "./tool-parts.ts";
 import { repairMathForDisplay } from "./math-delims.ts";
 
+/** Recover ONE extra JSON string layer that some model-authored questions carry
+ *  (a supplier that pre-encodes the tool input leaves `\n` and `\"` inside the
+ *  `question` field, so the dock shows a literal one-line blob instead of the
+ *  authored source). Decoding is gated on an ESCAPED code fence: a question
+ *  that already holds real newlines, or one whose only backslash-n is prose
+ *  (`what does \n mean in C++?`), is never touched. Shape parsing stays pure
+ *  (the tool-parts law) — this is a presentation projection, exactly like
+ *  `repairMathForDisplay`, and never reaches an option label, value, grading
+ *  or the saved snapshot. */
+export function recoverQuestionCode(text: string): string {
+	if (text.includes("\n") || !/(?:^|\\n)[ \t]{0,3}(?:`{3,}|~{3,})[^\s\\]*\\n/.test(text)) return text;
+	try {
+		const decoded: unknown = JSON.parse(`"${text}"`);
+		return typeof decoded === "string" ? decoded : text;
+	} catch {
+		return text;
+	}
+}
+
 export function answerForPresentation(answer: QuestionAnswerData, input: unknown): QuestionAnswerData {
 	if (answer.dismissed) return answer;
 	const quiz = answer.kind === "quiz" ? parseQuizInput(input) : undefined;
 	const explain = answer.kind === "explain" ? parseExplainInput(input) : undefined;
 	const source = quiz ?? explain ?? (answer.kind === "ask" ? parseAskInput(input) : undefined);
 	if (!source) return answer;
-	const projected = { ...answer, questionText: source.question };
+	const projected = { ...answer, questionText: recoverQuestionCode(source.question) };
 	if (quiz) projected.explanation = quiz.explanation;
 	if (explain) projected.committed = explain.correctAnswer;
 	if (!answer.options?.length || !("options" in source) || !source.options?.length) return projected;

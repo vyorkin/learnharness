@@ -9,6 +9,7 @@ import { ToolContentResponse } from "@/components/ai-elements/message";
 import { cn } from "@/lib/utils";
 import {
 	buildAnswer,
+	recoverQuestionCode,
 	repairMathForDisplay,
 	normalizeQuizType,
 	CONFIDENCE_STOPS,
@@ -142,7 +143,7 @@ export function QuestionDock({
 			{!expanded && (
 				<QuestionDockBar
 					toolName={canonical}
-					question={parsed.question}
+					question={recoverQuestionCode(parsed.question)}
 					onExpand={onExpand}
 					variant={reveal ? "reveal" : "collapsed"}
 					toolLabel={toolLabel}
@@ -580,7 +581,7 @@ function QuestionDockForm({
 					{qd.mode === "multi-select" && " · select all that apply"}
 				</div>
 				<div className="mb-3 font-medium">
-					<ToolContentResponse>{qd.question}</ToolContentResponse>
+					<ToolContentResponse>{recoverQuestionCode(qd.question)}</ToolContentResponse>
 				</div>
 				{qd.context && (
 					<div className="mb-3 text-sm text-muted-foreground">

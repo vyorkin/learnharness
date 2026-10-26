@@ -9,7 +9,7 @@ import { MessageResponse, ToolContentResponse } from "../components/ai-elements/
 import { QuestionDock } from "../components/question-dock.tsx";
 import { AnsweredCard } from "../components/answered-card.tsx";
 import { answerForPresentation, buildAnswer, normalizeOptions, parseAskInput, parseExplainInput, parseQuizInput,
-	repairMathForDisplay, resolveCorrect, type QuestionAnswerData, type QuestionData } from "../src/core/index.ts";
+	recoverQuestionCode, repairMathForDisplay, resolveCorrect, type QuestionAnswerData, type QuestionData } from "../src/core/index.ts";
 
 const fixtures = JSON.parse(readFileSync(new URL("./fixtures/tool-rendering/matrix-regressions.json", import.meta.url), "utf8")) as {
 	cases: Array<{ chatId: string; source: string; raw: string; oldDisplay: string }>;
@@ -161,4 +161,58 @@ test("historical ambiguous options and absent/invalid original calls retain thei
 	const before = structuredClone(answer);
 	renderToStaticMarkup(<AnsweredCard answer={answer} />);
 	assert.deepEqual(answer, before);
+});
+
+/* One extra JSON layer in `question` (a supplier that pre-encodes the tool
+ * input): the dock must show the authored source, not a literal one-line
+ * blob. Recovery is a PRESENTATION projection (the tool-parts law): shape
+ * parsing stays pure, and no option identity, grade or snapshot changes. */
+const codeQuestion = [
+	"In C++, what does this program do?", "", "```cpp",
+	"#include <string>", "#include <iostream>", "",
+	"int main() {",
+	'    std::string s = "hello";',
+	String.raw`    std::cout << s << "\n";`,
+	String.raw`    auto path = "C:\\new\\test";`,
+	"}", "```",
+].join("\n");
+const doubleEncoded = JSON.stringify(codeQuestion).slice(1, -1);
+
+test("recoverQuestionCode decodes one escaped layer only when an escaped code fence proves it", () => {
+	assert.equal(recoverQuestionCode(doubleEncoded), codeQuestion);
+	// Already-decoded markdown: real newlines, nothing to do.
+	assert.equal(recoverQuestionCode(codeQuestion), codeQuestion);
+	// Prose about escapes, no code fence: untouched.
+	for (const prose of [String.raw`What does \n mean in C++?`, String.raw`Read C:\new\test and $\nu$.`]) {
+		assert.equal(recoverQuestionCode(prose), prose);
+	}
+	// Unparseable as a JSON string body (a bare quote): untouched, never a throw.
+	const bare = 'Explain "this \\n ```x\\n``` case';
+	assert.equal(recoverQuestionCode(bare), bare);
+});
+
+test("a saved answer's presentation recovers the question without touching identities or the snapshot", () => {
+	const source = { question: doubleEncoded, options: [{ label: "Prints hello", value: "yes" }, { label: "Compile error", value: "no" }], correctAnswer: "yes", explanation: "It prints the string." };
+	const answer: QuestionAnswerData = { kind: "quiz", questionText: doubleEncoded, options: [{ index: 1, label: "Prints hello" }, { index: 2, label: "Compile error" }],
+		answers: [{ index: 1, label: "Prints hello", value: "yes" }], correct: true, correctIndices: [1], dontKnow: false,
+		explanation: "It prints the string.", confidence: 70, answeredAt: "synthetic" };
+	const before = structuredClone({ answer, source });
+	const projected = answerForPresentation(answer, source);
+	assert.equal(projected.questionText, codeQuestion);
+	assert.deepEqual(projected.answers, answer.answers);
+	assert.deepEqual(projected.correctIndices, answer.correctIndices);
+	assert.equal(projected.correct, true);
+	const html = renderToStaticMarkup(<AnsweredCard answer={answer} input={source} />);
+	assert.ok(html.includes('data-streamdown="code-block"'), "the fence renders as a code block");
+	assert.ok(!html.includes("```cpp"), "the fence is never shown as text");
+	assert.deepEqual({ answer, source }, before);
+});
+
+test("the live dock renders a double-encoded question as source and never mutates the call", () => {
+	const source = { question: doubleEncoded, options: [{ label: "Prints hello" }, { label: "Compile error" }] };
+	const before = structuredClone(source);
+	const html = renderToStaticMarkup(<QuestionDock toolName="ask_user_question" toolCallId="code_q" input={source} expanded onExpand={() => {}} onSubmit={() => {}} />);
+	assert.ok(html.includes('data-streamdown="code-block"'));
+	assert.ok(!html.includes("```cpp"), "the fence is not shown as text");
+	assert.deepEqual(source, before, "the call is never mutated");
 });
