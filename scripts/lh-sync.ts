@@ -335,6 +335,36 @@ function pushWholeFiles(bundle: SyncBundle, staged: BundleRead, written: string[
 	return deferred;
 }
 
+/**
+ * Is the peer (as of the pull) already holding everything this run would push?
+ * A pure in-memory comparison — the point is to skip the push entirely when a
+ * tick found nothing to do, which is the common case (idle ticks then cost one
+ * rsync pull instead of a dozen ssh round trips).
+ */
+function peerIsCurrent(bundle: SyncBundle, staged: BundleRead): boolean {
+	const stagedBundle = staged.bundle;
+	const superset = <T>(mine: ReadonlyArray<T>, theirs: ReadonlyArray<T>, key: (value: T) => string): boolean => {
+		const known = new Set(theirs.map(key));
+		return mine.every((item) => known.has(key(item)));
+	};
+	if (!superset(bundle.nodes, stagedBundle.nodes, (line) => syncLineKeys.node(line))) return false;
+	if (!superset(bundle.chains, stagedBundle.chains, (line) => syncLineKeys.chain(line))) return false;
+	if (!superset(bundle.coverage, stagedBundle.coverage, syncLineKeys.coverage)) return false;
+	if (!superset(bundle.checkpoints, stagedBundle.checkpoints, syncLineKeys.checkpoint)) return false;
+	if (!superset(bundle.deletions, stagedBundle.deletions, syncLineKeys.deletion)) return false;
+	if (!superset(bundle.chatTombstones, stagedBundle.chatTombstones, syncLineKeys.chatTombstone)) return false;
+	const stagedChats = new Map(stagedBundle.chats.map((chat) => [chat.id, JSON.stringify(chat, null, "\t")]));
+	for (const chat of bundle.chats) {
+		if (stagedChats.get(chat.id) !== JSON.stringify(chat, null, "\t")) return false;
+	}
+	const positions = JSON.stringify({ positions: bundle.positions, updatedAt: bundle.positionsUpdatedAt });
+	const stagedPositions = JSON.stringify({ positions: stagedBundle.positions, updatedAt: stagedBundle.positionsUpdatedAt });
+	if (positions !== stagedPositions) return false;
+	const sources = JSON.stringify(Object.fromEntries(bundle.sources.map((source) => [source.id, source])));
+	const stagedSources = JSON.stringify(Object.fromEntries(stagedBundle.sources.map((source) => [source.id, source])));
+	return sources === stagedSources;
+}
+
 // ─── busy guard + lock ───────────────────────────────────────────────────────
 
 async function appIsBusy(): Promise<boolean> {
@@ -498,6 +528,10 @@ async function main(): Promise<void> {
 		}
 
 		// ── peer side: append ledgers, guarded whole-file writes ─────────────
+		if (peerIsCurrent(bundle, staged)) {
+			console.log("[sync] the peer already holds everything — push skipped");
+			return;
+		}
 		const pushedLedgers = pushLedgers(bundle, staged);
 		const pushedFiles = pushWholeFiles(bundle, staged, written);
 		console.log(
