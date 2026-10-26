@@ -78,6 +78,14 @@
 		"katex": "$katex",
 		"ansi-to-react": {
 			"linkify-it": "5.0.2"
+		},
+		"dompurify": "3.4.17",
+		"source-map-js": "1.2.2",
+		"openai": {
+			"undici": "7.30.1"
+		},
+		"@electron/get": {
+			"undici": "7.30.1"
 		}
 	},
 	"devDependencies": {
