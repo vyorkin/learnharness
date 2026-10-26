@@ -34,9 +34,30 @@ npx tsx --env-file=.env.local scripts/replay-layout.ts        # re-derive layout
 npx tsx scripts/migrate-hash-ids.ts [--data <dir>] [--apply]  # v1 -> v2: content-addressed ids (dry-run by default)
 
 # cross-machine sync (graph ledgers + chats; settings/jobs/secrets never move)
+# ledgers are APPENDED, never rewritten; a whole-file write happens only when the
+# bytes are unchanged since the run read them — so a running app is never raced
 npm run lh:sync -- --peer bankai              # pull, merge, push
 npm run lh:sync -- --peer bankai --dry-run    # pull, merge, report, write nothing
 npm run lh:sync -- --peer-dir /tmp/data-copy  # a local directory (tests, staging)
+
+### Automatic sync (systemd user timer)
+
+Each machine runs the same oneshot service every five minutes; `lh:sync` is
+append-only for the ledgers and defers any whole-file write whose bytes moved
+under it, so a tick can run while the app is teaching.
+
+```
+~/.config/systemd/user/lh-sync.service   # ExecStart: npm run lh:sync -- --peer <other> --data <dir> --skip-if-busy
+~/.config/systemd/user/lh-sync.timer      # OnUnitActiveSec=5min, RandomizedDelaySec (stagger the two machines)
+systemctl --user enable --now lh-sync.timer
+journalctl --user -u lh-sync.service -f  # what each tick did
+```
+
+`--skip-if-busy` asks the app (GET /api/activity, /api/graph/status) whether a
+turn or an extraction is running and skips that tick: a half-written turn is
+never synced. Without a running app the guard reads as "not busy". On this PC
+the app answers on :3300 (run-lh.sh); on bankai :3000. A stale lock (a killed
+run) is reclaimed after 15 minutes; a second concurrent tick is refused.
 ```
 
 For Windows/Linux packages and the three-OS CI/release flow, see [`desktop-release.md`](desktop-release.md). Native renderer binaries are traced per platform, so release builds run on the target OS, not as cross-builds from macOS.

@@ -1,32 +1,37 @@
 /**
- * Cross-machine sync — the transport + write side (2026-10-26, owner design).
+ * Cross-machine sync — transport + write side (2026-10-26, owner design).
  *
- *   npm run lh:sync -- --peer bankai                 # pull, merge, push
- *   npm run lh:sync -- --peer bankai --dry-run       # pull, merge, report, write nothing
- *   npm run lh:sync -- --peer-dir /tmp/other-data    # a local directory (tests, staging)
+ *   npm run lh:sync -- --peer bankai                  # pull, merge, write, push
+ *   npm run lh:sync -- --peer bankai --skip-if-busy   # the timer's form: a busy app skips the tick
+ *   npm run lh:sync -- --peer bankai --dry-run        # pull, merge, report, write nothing
+ *   npm run lh:sync -- --peer-dir /tmp/other-data     # a local directory (tests, staging)
  *
- * What moves: the graph ledgers (nodes, chains, coverage, checkpoints,
- * deletions, positions, render-settings, sources) and the chat records with
- * their deletion tombstones. What never moves: settings.json (machine
- * specific), jobs/ (ephemeral background work), .env.local / auth.json
- * (secrets).
+ * SAFE TO RUN WHILE THE APP IS RUNNING (this is what makes a timer sound):
  *
- * The merge itself is pure and lives in src/core/sync-merge.ts; this script is
- * the composition root — rsync the other side in, read both sides off disk,
- * merge, write the local files that changed, rsync the merged set back.
+ *   graph ledgers    APPEND ONLY, on both sides. A sync never rewrites
+ *                    nodes/chains/coverage/sessions/deleted — it appends the
+ *                    lines the other side lacks. A rewrite would be a
+ *                    read-modify-write racing the app's own appends, and the
+ *                    append it loses is a lesson or a fact.
+ *   chats, sources,
+ *   positions        whole-file writes, but only when the current bytes still
+ *                    equal what this run read: if the app (or the peer) moved
+ *                    the file meanwhile, the file is DEFERRED to the next tick
+ *                    instead of being overwritten.
+ *   render-settings  the local blob wins; the peer's only fills an empty side.
  *
- * Refusals (a sync must never make things worse):
- *   - the local graph is not at content-addressed ids yet (format < 2):
- *     run `npx tsx scripts/migrate-hash-ids.ts --apply` first, on BOTH sides;
- *   - a chat message id exists on both sides with different content: the
- *     incoming message is parked under .sync/conflicts/ and NOTHING is written
- *     or pushed (--force overrides, keeping the local message);
- *   - rsync/ssh fails: nothing is written.
+ * Never synced: settings.json (machine-specific), jobs/ (ephemeral), .env.local
+ * and auth.json (secrets).
+ *
+ * Refusals: a peer still at graph format < 2 (syncing un-migrated data would
+ * duplicate every node); a conflicting chat message (parked under
+ * .sync/conflicts/, nothing written or pushed, --force keeps the local copy).
+ * A second concurrent run on this machine is refused by a lock directory.
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { mergeBundles, type SyncBundle, type SyncReport } from "../src/core/sync-merge.ts";
+import { mergeBundles, syncLineKeys, type SyncBundle, type SyncReport } from "../src/core/sync-merge.ts";
 import type {
 	ChatRecord,
 	ChatTombstone,
@@ -51,10 +56,13 @@ function argValue(flag: string): string | undefined {
 const PEER = argValue("--peer");
 const PEER_DIR = argValue("--peer-dir");
 const REMOTE_DATA = argValue("--remote-data") ?? ".local/share/learnharness/data";
-const DATA_DIR = path.resolve(argValue("--data") ?? "data");
+// The app's own seam: LH_DATA_DIR names the data dir when --data is absent.
+const DATA_DIR = path.resolve(argValue("--data") ?? process.env.LH_DATA_DIR ?? "data");
+const APP_URL = argValue("--app-url") ?? "http://localhost:3300";
 const DRY_RUN = process.argv.includes("--dry-run");
 const NO_PUSH = process.argv.includes("--no-push");
 const FORCE = process.argv.includes("--force");
+const SKIP_IF_BUSY = process.argv.includes("--skip-if-busy");
 
 if (!PEER && !PEER_DIR) {
 	console.error("lh:sync needs a peer: --peer <ssh-host> or --peer-dir <data-dir>");
@@ -63,16 +71,69 @@ if (!PEER && !PEER_DIR) {
 
 const STAGING = path.join(path.dirname(DATA_DIR), ".sync", "incoming");
 const CONFLICTS = path.join(path.dirname(DATA_DIR), ".sync", "conflicts");
+const LOCK = path.join(path.dirname(DATA_DIR), ".sync", "run.lock");
 
-// ─── read one side off disk (tolerant: a missing file is an empty list) ──────
+// ─── the remote side: ssh (or a local directory), uniformly ──────────────────
 
-function readJsonl<T>(file: string): T[] {
-	let raw: string;
-	try {
-		raw = fs.readFileSync(file, "utf-8");
-	} catch {
-		return [];
+const remoteBase = (): string => (PEER_DIR ? path.resolve(PEER_DIR) : REMOTE_DATA);
+
+/** Read one file off the peer, or null when it does not exist. */
+function remoteRead(relative: string): string | null {
+	const target = `${remoteBase()}/${relative}`;
+	if (PEER_DIR) {
+		try {
+			return fs.readFileSync(target, "utf-8");
+		} catch {
+			return null;
+		}
 	}
+	const result = spawnSync("ssh", [PEER!, `cat '${target.replace(/'/g, `'\\''`)}' 2>/dev/null`], { encoding: "utf-8" });
+	return result.status === 0 ? result.stdout : null;
+}
+
+/** Append bytes on the peer. O_APPEND writes of one line are atomic. */
+function remoteAppend(relative: string, body: string): void {
+	const target = `${remoteBase()}/${relative}`;
+	if (PEER_DIR) {
+		fs.mkdirSync(path.dirname(target), { recursive: true });
+		fs.appendFileSync(target, body, "utf-8");
+		return;
+	}
+	const result = spawnSync("ssh", [PEER!, `mkdir -p '${path.posix.dirname(target)}' && cat >> '${target.replace(/'/g, `'\\''`)}'`], {
+		input: body,
+		encoding: "utf-8",
+	});
+	if (result.status !== 0) throw new Error(`ssh append failed for ${relative}: ${result.stderr.trim() || result.status}`);
+}
+
+/** Replace one file on the peer (used only when the peer's bytes are known). */
+function remoteWrite(relative: string, body: string): void {
+	const target = `${remoteBase()}/${relative}`;
+	if (PEER_DIR) {
+		fs.mkdirSync(path.posix.dirname(target), { recursive: true });
+		fs.writeFileSync(target, body, "utf-8");
+		return;
+	}
+	const result = spawnSync("rsync", ["-a", "--files-from=-", `${DATA_DIR}/`, `${PEER}:${remoteBase()}/`], {
+		input: `${relative}\n`,
+		encoding: "utf-8",
+	});
+	if (result.status !== 0) throw new Error(`rsync ${relative} failed: ${result.stderr.trim() || result.status}`);
+	void body;
+}
+
+// ─── local file reads (content is kept: it is the "did it change?" baseline) ─
+
+function readFileOrNull(file: string): string | null {
+	try {
+		return fs.readFileSync(file, "utf-8");
+	} catch {
+		return null;
+	}
+}
+
+function jsonlLines<T>(raw: string | null): T[] {
+	if (!raw) return [];
 	const out: T[] = [];
 	for (const line of raw.split("\n")) {
 		const trimmed = line.trim();
@@ -80,67 +141,115 @@ function readJsonl<T>(file: string): T[] {
 		try {
 			out.push(JSON.parse(trimmed) as T);
 		} catch {
-			// A torn append is skipped here too — same doctrine as the stores.
+			/* a torn append is skipped here too — same doctrine as the stores */
 		}
 	}
 	return out;
 }
 
-function readJson<T>(file: string): T | undefined {
+function parseJson<T>(raw: string | null): T | undefined {
+	if (!raw) return undefined;
 	try {
-		return JSON.parse(fs.readFileSync(file, "utf-8")) as T;
+		return JSON.parse(raw) as T;
 	} catch {
 		return undefined;
 	}
 }
 
-/** The graph-family format version stamped in a data dir (0 = unstamped). */
-function graphFormatVersion(dir: string): number {
-	const stamped = readJson<{ version?: number }>(path.join(dir, "graph", "format.json"));
-	return typeof stamped?.version === "number" ? stamped.version : 0;
+interface BundleRead {
+	bundle: SyncBundle;
+	/** rel path → exact bytes read (the baseline for "unchanged?" checks). */
+	contents: Map<string, string>;
 }
 
-function readBundle(dir: string): SyncBundle {
-	const graph = path.join(dir, "graph");
-	const chatsDir = path.join(dir, "chats");
-	const positions = readJson<{ positions?: Record<string, Position>; updatedAt?: string }>(path.join(graph, "positions.json"));
-	const renderSettings = readJson<unknown>(path.join(graph, "render-settings.json"));
-	const sources = readJson<Record<string, NotesSource>>(path.join(graph, "sources.json"));
-	let chatFiles: string[] = [];
+function readBundle(dir: string): BundleRead {
+	const contents = new Map<string, string>();
+	const read = (relative: string): string | null => {
+		const raw = readFileOrNull(path.join(dir, relative));
+		if (raw !== null) contents.set(relative, raw);
+		return raw;
+	};
+	const positions = parseJson<{ positions?: Record<string, Position>; updatedAt?: string }>(read("graph/positions.json"));
+	const sources = parseJson<Record<string, NotesSource>>(read("graph/sources.json"));
+	let chatNames: string[] = [];
 	try {
-		chatFiles = fs.readdirSync(chatsDir).filter((name) => name.endsWith(".json"));
+		chatNames = fs.readdirSync(path.join(dir, "chats")).filter((name) => name.endsWith(".json"));
 	} catch {
-		chatFiles = [];
+		chatNames = [];
+	}
+	const chats: ChatRecord[] = [];
+	for (const name of chatNames) {
+		const record = parseJson<ChatRecord>(read(`chats/${name}`));
+		if (record && typeof record.id === "string") chats.push(record);
 	}
 	return {
-		nodes: readJsonl<GraphNode>(path.join(graph, "nodes.jsonl")),
-		chains: readJsonl<GraphChain>(path.join(graph, "chains.jsonl")),
-		coverage: readJsonl<CoverageEntry>(path.join(graph, "coverage.jsonl")),
-		checkpoints: readJsonl<SessionCheckpoint>(path.join(graph, "sessions.jsonl")),
-		deletions: readJsonl<GraphTombstone>(path.join(graph, "deleted.jsonl")),
-		chats: chatFiles
-			.map((name) => readJson<ChatRecord>(path.join(chatsDir, name)))
-			.filter((record): record is ChatRecord => record !== undefined && typeof record.id === "string"),
-		chatTombstones: readJsonl<ChatTombstone>(path.join(chatsDir, "deleted.jsonl")),
-		positions: positions?.positions ?? {},
-		positionsUpdatedAt: positions?.updatedAt,
-		renderSettings,
-		// sources.json is one map (id -> NotesSource); the bundle carries a list.
-		sources: Object.values(sources ?? {}),
+		contents,
+		bundle: {
+			nodes: jsonlLines<GraphNode>(contents.get("graph/nodes.jsonl") ?? read("graph/nodes.jsonl")),
+			chains: jsonlLines<GraphChain>(contents.get("graph/chains.jsonl") ?? read("graph/chains.jsonl")),
+			coverage: jsonlLines<CoverageEntry>(contents.get("graph/coverage.jsonl") ?? read("graph/coverage.jsonl")),
+			checkpoints: jsonlLines<SessionCheckpoint>(contents.get("graph/sessions.jsonl") ?? read("graph/sessions.jsonl")),
+			deletions: jsonlLines<GraphTombstone>(contents.get("graph/deleted.jsonl") ?? read("graph/deleted.jsonl")),
+			chats,
+			chatTombstones: jsonlLines<ChatTombstone>(contents.get("chats/deleted.jsonl") ?? read("chats/deleted.jsonl")),
+			positions: positions?.positions ?? {},
+			positionsUpdatedAt: positions?.updatedAt,
+			renderSettings: parseJson<unknown>(read("graph/render-settings.json")),
+			sources: Object.values(sources ?? {}),
+		},
 	};
 }
 
-// ─── write one side (only files whose content changed) ───────────────────────
+// ─── ledger appends (never rewrites) ─────────────────────────────────────────
 
-const jsonl = (records: ReadonlyArray<unknown>): string =>
-	records.map((record) => JSON.stringify(record)).join("\n") + (records.length > 0 ? "\n" : "");
+interface Ledger {
+	relative: string;
+	records: unknown[];
+	key: (record: never) => string;
+}
 
-function writeIfChanged(file: string, body: string, written: string[]): void {
-	let current: string | undefined;
-	try {
-		current = fs.readFileSync(file, "utf-8");
-	} catch {
-		current = undefined;
+function ledgerPlan(bundle: SyncBundle): Ledger[] {
+	return [
+		{ relative: "graph/nodes.jsonl", records: bundle.nodes, key: syncLineKeys.node as (record: never) => string },
+		{ relative: "graph/chains.jsonl", records: bundle.chains, key: syncLineKeys.chain as (record: never) => string },
+		{ relative: "graph/coverage.jsonl", records: bundle.coverage, key: syncLineKeys.coverage as (record: never) => string },
+		{ relative: "graph/sessions.jsonl", records: bundle.checkpoints, key: syncLineKeys.checkpoint as (record: never) => string },
+		{ relative: "graph/deleted.jsonl", records: bundle.deletions, key: syncLineKeys.deletion as (record: never) => string },
+		{ relative: "chats/deleted.jsonl", records: bundle.chatTombstones, key: syncLineKeys.chatTombstone as (record: never) => string },
+	];
+}
+
+/** The lines of `records` whose key is not present in `existing`. */
+function missingLines(records: unknown[], existing: string | null, key: (record: never) => string): string[] {
+	const known = new Set(jsonlLines<unknown>(existing).map((record) => key(record as never)));
+	const out: string[] = [];
+	for (const record of records) {
+		const id = key(record as never);
+		if (known.has(id)) continue;
+		known.add(id);
+		out.push(JSON.stringify(record));
+	}
+	return out;
+}
+
+function appendLocal(relative: string, records: unknown[], key: (record: never) => string, written: string[]): number {
+	const file = path.join(DATA_DIR, relative);
+	const body = missingLines(records, readFileOrNull(file), key);
+	if (body.length === 0) return 0;
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.appendFileSync(file, body.join("\n") + "\n", "utf-8");
+	written.push(file);
+	return body.length;
+}
+
+// ─── local whole-file writes, guarded by the read baseline ───────────────────
+
+function writeLocalIfUnchanged(relative: string, body: string, baseline: string | undefined, written: string[], deferred: string[]): void {
+	const file = path.join(DATA_DIR, relative);
+	const current = readFileOrNull(file);
+	if (baseline !== undefined && current !== baseline) {
+		deferred.push(relative); // the app (or another run) moved it — next tick
+		return;
 	}
 	if (current === body) return;
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -150,43 +259,7 @@ function writeIfChanged(file: string, body: string, written: string[]): void {
 	written.push(file);
 }
 
-function writeBundle(dir: string, bundle: SyncBundle): string[] {
-	const graph = path.join(dir, "graph");
-	const chatsDir = path.join(dir, "chats");
-	const written: string[] = [];
-	// An empty collection never CREATES a ledger: a family that has never
-	// emitted something must stay "nothing yet", not gain an empty file.
-	const writeLedger = (file: string, body: string): void => {
-		if (body === "" && !fs.existsSync(file)) return;
-		writeIfChanged(file, body, written);
-	};
-	writeLedger(path.join(graph, "nodes.jsonl"), jsonl(bundle.nodes));
-	writeLedger(path.join(graph, "chains.jsonl"), jsonl(bundle.chains));
-	writeLedger(path.join(graph, "coverage.jsonl"), jsonl(bundle.coverage));
-	writeLedger(path.join(graph, "sessions.jsonl"), jsonl(bundle.checkpoints));
-	writeLedger(path.join(graph, "deleted.jsonl"), jsonl(bundle.deletions));
-	writeIfChanged(
-		path.join(graph, "positions.json"),
-		JSON.stringify({ positions: bundle.positions, updatedAt: bundle.positionsUpdatedAt ?? new Date().toISOString() }, null, "\t"),
-		written,
-	);
-	if (bundle.renderSettings !== undefined && bundle.renderSettings !== null) {
-		writeIfChanged(path.join(graph, "render-settings.json"), JSON.stringify(bundle.renderSettings, null, "\t"), written);
-	}
-	if (bundle.sources.length > 0) {
-		const map = Object.fromEntries(bundle.sources.map((source) => [source.id, source]));
-		writeIfChanged(path.join(graph, "sources.json"), JSON.stringify(map, null, "\t"), written);
-	}
-	for (const chat of bundle.chats) {
-		writeIfChanged(path.join(chatsDir, `${chat.id}.json`), JSON.stringify(chat, null, "\t"), written);
-	}
-	if (bundle.chatTombstones.length > 0) {
-		writeIfChanged(path.join(chatsDir, "deleted.jsonl"), jsonl(bundle.chatTombstones), written);
-	}
-	return written;
-}
-
-// ─── transport ───────────────────────────────────────────────────────────────
+// ─── transport: pull / push ──────────────────────────────────────────────────
 
 const PULL_EXCLUDES = [
 	"settings.json",
@@ -200,50 +273,123 @@ const PULL_EXCLUDES = [
 	"*.sync-*",
 ];
 
-const PUSH_FILES = [
-	"graph/nodes.jsonl",
-	"graph/chains.jsonl",
-	"graph/coverage.jsonl",
-	"graph/sessions.jsonl",
-	"graph/deleted.jsonl",
-	"graph/positions.json",
-	"graph/render-settings.json",
-	"graph/sources.json",
-	"graph/format.json",
-	"chats/deleted.jsonl",
-];
-
-function remoteSource(): string {
-	if (PEER_DIR) return path.resolve(PEER_DIR);
-	return `${PEER}:${REMOTE_DATA}`;
-}
-
 function pull(): void {
 	fs.rmSync(STAGING, { recursive: true, force: true });
 	fs.mkdirSync(STAGING, { recursive: true });
-	const args = ["-a", "--delete", ...PULL_EXCLUDES.flatMap((pattern) => ["--exclude", pattern]), `${remoteSource()}/`, `${STAGING}/`];
-	execFileSync("rsync", args, { stdio: ["ignore", "inherit", "inherit"] });
+	const source = PEER_DIR ? path.resolve(PEER_DIR) : `${PEER}:${REMOTE_DATA}`;
+	execFileSync(
+		"rsync",
+		["-a", "--delete", ...PULL_EXCLUDES.flatMap((pattern) => ["--exclude", pattern]), `${source}/`, `${STAGING}/`],
+		{ stdio: ["ignore", "inherit", "inherit"] },
+	);
 }
 
-function push(): void {
-	// Only files that EXIST: rsync --files-from treats a missing entry as an
-	// error, and an empty ledger family is a normal first-boot state.
-	const files = PUSH_FILES.filter((relative) => fs.existsSync(path.join(DATA_DIR, relative)));
-	try {
-		files.push(...fs.readdirSync(path.join(DATA_DIR, "chats")).filter((name) => name.endsWith(".json")).map((name) => `chats/${name}`));
-	} catch {
-		/* no chats yet */
+function pushLedgers(bundle: SyncBundle, staged: BundleRead): { appended: number; deferred: string[] } {
+	let appended = 0;
+	const deferred: string[] = [];
+	for (const ledger of ledgerPlan(bundle)) {
+		const body = missingLines(ledger.records, remoteRead(ledger.relative), ledger.key);
+		if (body.length === 0) continue;
+		// The peer's ledger is append-only too, so an append can never clobber
+		// a line it wrote after our pull — no "unchanged" check needed.
+		remoteAppend(ledger.relative, body.join("\n") + "\n");
+		appended += body.length;
 	}
-	const result = spawnSync("rsync", ["-a", "--files-from=-", `${DATA_DIR}/`, `${remoteSource()}/`], {
-		input: files.join("\n") + "\n",
-		encoding: "utf-8",
-	});
-	if (result.status !== 0) throw new Error(`rsync push failed: ${result.stderr.trim() || result.status}`);
+	void staged;
+	return { appended, deferred };
+}
+
+function pushWholeFiles(bundle: SyncBundle, staged: BundleRead, written: string[]): string[] {
+	const deferred: string[] = [];
+	const peerUnchanged = (relative: string): boolean =>
+		(remoteRead(relative) ?? null) === (staged.contents.get(relative) ?? null);
+
+	// positions: derived cache, but still only written over a known peer state
+	const positionsBody = JSON.stringify(
+		{ positions: bundle.positions, updatedAt: bundle.positionsUpdatedAt ?? new Date().toISOString() },
+		null,
+		"\t",
+	);
+	if (staged.contents.has("graph/positions.json") || Object.keys(bundle.positions).length > 0) {
+		if (peerUnchanged("graph/positions.json")) remoteWrite("graph/positions.json", positionsBody);
+		else deferred.push("graph/positions.json");
+	}
+	// sources: the notes bookkeeping
+	if (bundle.sources.length > 0) {
+		const body = JSON.stringify(Object.fromEntries(bundle.sources.map((source) => [source.id, source])), null, "\t");
+		if (peerUnchanged("graph/sources.json")) remoteWrite("graph/sources.json", body);
+		else deferred.push("graph/sources.json");
+	}
+	// chats: only over the exact bytes this run pulled
+	for (const chat of bundle.chats) {
+		const relative = `chats/${chat.id}.json`;
+		const body = JSON.stringify(chat, null, "\t");
+		if (staged.contents.get(relative) === body) continue;
+		if (peerUnchanged(relative)) {
+			remoteWrite(relative, body);
+			written.push(relative);
+		} else {
+			deferred.push(relative);
+		}
+	}
+	return deferred;
+}
+
+// ─── busy guard + lock ───────────────────────────────────────────────────────
+
+async function appIsBusy(): Promise<boolean> {
+	const get = async (route: string): Promise<unknown> => {
+		try {
+			const response = await fetch(`${APP_URL}${route}`, { signal: AbortSignal.timeout(5000) });
+			return response.ok ? await response.json() : undefined;
+		} catch {
+			return undefined; // app not running → nothing can be mid-write
+		}
+	};
+	const activity = (await get("/api/activity")) as { runs?: unknown[] } | undefined;
+	if (Array.isArray(activity?.runs) && activity.runs.length > 0) return true;
+	const graph = (await get("/api/graph/status")) as { runs?: unknown[] } | undefined;
+	return Array.isArray(graph?.runs) && graph.runs.length > 0;
+}
+
+function takeLock(): boolean {
+	try {
+		fs.mkdirSync(path.dirname(LOCK), { recursive: true });
+		fs.mkdirSync(LOCK);
+		fs.writeFileSync(path.join(LOCK, "pid"), String(process.pid), "utf-8");
+		return true;
+	} catch {
+		// Stale lock from a killed run: a tick every few minutes must not wedge.
+		try {
+			const age = Date.now() - fs.statSync(LOCK).mtimeMs;
+			if (age > 15 * 60_000) {
+				fs.rmSync(LOCK, { recursive: true, force: true });
+				fs.mkdirSync(LOCK);
+				return true;
+			}
+		} catch {
+			/* raced with the holder releasing it */
+		}
+		return false;
+	}
+}
+
+function releaseLock(): void {
+	try {
+		fs.rmSync(LOCK, { recursive: true, force: true });
+	} catch {
+		/* nothing to release */
+	}
 }
 
 // ─── main ────────────────────────────────────────────────────────────────────
 
-function reportLine(report: SyncReport, written: string[]): void {
+function graphFormatVersion(dir: string): number {
+	const stamped = parseJson<{ version?: number }>(readFileOrNull(path.join(dir, "graph", "format.json")));
+	return typeof stamped?.version === "number" ? stamped.version : 0;
+}
+
+function reportLine(report: SyncReport, appended: number, pushed: number, written: string[], deferred: string[]): void {
 	const added = [
 		report.nodes ? `+${report.nodes} node lines` : "",
 		report.chains ? `+${report.chains} chain lines` : "",
@@ -256,71 +402,110 @@ function reportLine(report: SyncReport, written: string[]): void {
 		report.sources ? `+${report.sources} sources` : "",
 	].filter(Boolean);
 	console.log(`[sync] ${added.length > 0 ? added.join(", ") : "nothing new"}`);
-	console.log(`[sync] positions: ${report.positionsFrom} · render-settings: ${report.renderSettingsFrom}`);
-	console.log(`[sync] wrote ${written.length} local file(s)${written.length > 0 && written.length <= 6 ? `: ${written.map((file) => path.relative(DATA_DIR, file)).join(", ")}` : ""}`);
+	console.log(`[sync] wrote ${written.length} local file(s), appended ${appended} line(s) locally`);
+	console.log(`[sync] pushed: ${pushed} appended line(s), ${report.positionsFrom === "incoming" ? "positions from peer" : "positions kept"}`);
+	if (deferred.length > 0) console.log(`[sync] deferred to the next tick (${deferred.length}): ${deferred.slice(0, 5).join(", ")}`);
 }
 
-function main(): void {
-	const localVersion = graphFormatVersion(DATA_DIR);
-	if (localVersion < 2) {
+async function main(): Promise<void> {
+	if (graphFormatVersion(DATA_DIR) < 2) {
 		console.error(
-			`[sync] REFUSED: ${DATA_DIR} is at graph format ${localVersion || "unstamped"} — ids are not content-addressed yet.\n` +
-				"[sync] Run `npx tsx scripts/migrate-hash-ids.ts --data <dir> --apply` on BOTH machines first, then sync.",
+			`[sync] REFUSED: ${DATA_DIR} is not content-addressed yet — run \`npx tsx scripts/migrate-hash-ids.ts --data <dir> --apply\` on BOTH machines first.`,
 		);
 		process.exit(1);
 	}
-	const remote = PEER_DIR ? path.resolve(PEER_DIR) : undefined;
-	if (remote && graphFormatVersion(remote) < 2) {
-		console.error(
-			`[sync] REFUSED: ${remote} is at graph format ${graphFormatVersion(remote) || "unstamped"} — migrate that side first.`,
-		);
-		process.exit(1);
+	if (SKIP_IF_BUSY && (await appIsBusy())) {
+		console.log("[sync] the app is mid-work — skipping this tick");
+		return;
+	}
+	if (!takeLock()) {
+		console.log("[sync] another sync is running — skipping this tick");
+		return;
 	}
 
-	console.log(`[sync] pulling ${remoteSource()} → ${STAGING}`);
-	pull();
+	try {
+		console.log(`[sync] pulling ${PEER_DIR ?? `${PEER}:${REMOTE_DATA}`} → ${STAGING}`);
+		pull();
 
-	// A remote that is not migrated is caught after the pull too (ssh peers).
-	const stagedVersion = graphFormatVersion(STAGING);
-	if (stagedVersion < 2) {
-		console.error(
-			`[sync] REFUSED: the peer's data is at graph format ${stagedVersion || "unstamped"} — migrate it first (the migration script lives in this tree).`,
-		);
-		process.exit(1);
-	}
-
-	const local = readBundle(DATA_DIR);
-	const incoming = readBundle(STAGING);
-	const { bundle, report } = mergeBundles(local, incoming);
-
-	if (report.conflicts.length > 0) {
-		fs.mkdirSync(CONFLICTS, { recursive: true });
-		for (const conflict of report.conflicts) {
-			const file = path.join(CONFLICTS, `${conflict.chatId}-${conflict.messageId}.json`);
-			fs.writeFileSync(file, JSON.stringify(conflict.incoming, null, "\t"), "utf-8");
-		}
-		console.error(`[sync] ${report.conflicts.length} message conflict(s) — incoming copies parked in ${CONFLICTS}`);
-		if (!FORCE) {
-			console.error("[sync] nothing written, nothing pushed. Resolve by hand, or re-run with --force to keep the local copies.");
+		const staged = readBundle(STAGING);
+		if (graphFormatVersion(STAGING) < 2) {
+			console.error("[sync] REFUSED: the peer's data is not content-addressed yet — migrate it first (the script lives in this tree).");
 			process.exit(1);
 		}
-	}
 
-	if (DRY_RUN) {
-		reportLine(report, []);
-		console.log("[sync] dry run — nothing written, nothing pushed");
-		return;
-	}
+		const local = readBundle(DATA_DIR);
+		const { bundle, report } = mergeBundles(local.bundle, staged.bundle);
 
-	const written = writeBundle(DATA_DIR, bundle);
-	reportLine(report, written);
+		if (report.conflicts.length > 0) {
+			fs.mkdirSync(CONFLICTS, { recursive: true });
+			for (const conflict of report.conflicts) {
+				fs.writeFileSync(
+					path.join(CONFLICTS, `${conflict.chatId}-${conflict.messageId}.json`),
+					JSON.stringify(conflict.incoming, null, "\t"),
+					"utf-8",
+				);
+			}
+			console.error(`[sync] ${report.conflicts.length} message conflict(s) — incoming copies parked in ${CONFLICTS}`);
+			if (!FORCE) {
+				console.error("[sync] nothing written, nothing pushed. Resolve by hand, or re-run with --force to keep the local copies.");
+				process.exit(1);
+			}
+		}
 
-	if (NO_PUSH) {
-		console.log("[sync] --no-push: the peer was not updated");
-		return;
+		if (DRY_RUN) {
+			reportLine(report, 0, 0, [], []);
+			console.log("[sync] dry run — nothing written, nothing pushed");
+			return;
+		}
+
+		// ── local side: append ledgers, guarded whole-file writes ────────────
+		const written: string[] = [];
+		const deferred: string[] = [];
+		let appended = 0;
+		for (const ledger of ledgerPlan(bundle)) appended += appendLocal(ledger.relative, ledger.records, ledger.key, written);
+
+		for (const chat of bundle.chats) {
+			const relative = `chats/${chat.id}.json`;
+			writeLocalIfUnchanged(relative, JSON.stringify(chat, null, "\t"), local.contents.get(relative), written, deferred);
+		}
+		if (Object.keys(bundle.positions).length > 0 || local.contents.has("graph/positions.json")) {
+			const body = JSON.stringify(
+				{ positions: bundle.positions, updatedAt: bundle.positionsUpdatedAt ?? new Date().toISOString() },
+				null,
+				"\t",
+			);
+			writeLocalIfUnchanged("graph/positions.json", body, local.contents.get("graph/positions.json"), written, deferred);
+		}
+		if (bundle.renderSettings !== undefined && bundle.renderSettings !== null && !local.contents.has("graph/render-settings.json")) {
+			writeLocalIfUnchanged(
+				"graph/render-settings.json",
+				JSON.stringify(bundle.renderSettings, null, "\t"),
+				undefined,
+				written,
+				deferred,
+			);
+		}
+		if (bundle.sources.length > 0) {
+			const body = JSON.stringify(Object.fromEntries(bundle.sources.map((source) => [source.id, source])), null, "\t");
+			writeLocalIfUnchanged("graph/sources.json", body, local.contents.get("graph/sources.json"), written, deferred);
+		}
+
+		reportLine(report, appended, 0, written, deferred);
+
+		if (NO_PUSH) {
+			console.log("[sync] --no-push: the peer was not updated");
+			return;
+		}
+
+		// ── peer side: append ledgers, guarded whole-file writes ─────────────
+		const pushedLedgers = pushLedgers(bundle, staged);
+		const pushedFiles = pushWholeFiles(bundle, staged, written);
+		console.log(
+			`[sync] pushed ${pushedLedgers.appended} ledger line(s), ${pushedFiles.length === 0 ? "no deferred peer files" : `${pushedFiles.length} peer file(s) deferred: ${pushedFiles.slice(0, 5).join(", ")}`}`,
+		);
+	} finally {
+		releaseLock();
 	}
-	push();
-	console.log(`[sync] pushed the merged set to ${remoteSource()}`);
 }
 
-main();
+await main();

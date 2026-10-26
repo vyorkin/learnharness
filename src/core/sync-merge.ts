@@ -114,6 +114,20 @@ const chainKeyOf = (line: GraphChain): string =>
 		provenance: [...line.provenance].sort((a, b) => `${a.chatId}|${a.messageId}`.localeCompare(`${b.chatId}|${b.messageId}`)),
 	});
 
+/**
+ * The line-identity keys the merge dedupes by — exported because the CLI also
+ * uses them to APPEND only lines the other side lacks (a rewrite would race
+ * the running app; an append cannot lose its work).
+ */
+export const syncLineKeys = {
+	node: nodeKey,
+	chain: chainKeyOf,
+	coverage: (entry: CoverageEntry): string => `${entry.chatId}|${entry.fp}`,
+	checkpoint: (row: SessionCheckpoint): string => `${row.chatId}|${row.foldedAt}`,
+	deletion: (row: GraphTombstone): string => `${row.id}|${row.deletedAt}`,
+	chatTombstone: (row: ChatTombstone): string => row.id,
+};
+
 function unionBy<T>(local: ReadonlyArray<T>, incoming: ReadonlyArray<T>, key: (value: T) => string): T[] {
 	const out = new Map<string, T>();
 	for (const item of local) out.set(key(item), item);
@@ -270,10 +284,10 @@ export function mergeBundles(local: SyncBundle, incoming: SyncBundle): SyncResul
 
 	const nodes = unionBy(local.nodes, incoming.nodes, nodeKey);
 	const chains = unionBy(local.chains, incoming.chains, chainKeyOf);
-	const coverage = unionBy(local.coverage, incoming.coverage, (entry) => `${entry.chatId}|${entry.fp}`);
-	const checkpoints = unionBy(local.checkpoints, incoming.checkpoints, (row) => `${row.chatId}|${row.foldedAt}`);
-	const deletions = unionBy(local.deletions, incoming.deletions, (row) => `${row.id}|${row.deletedAt}`);
-	const chatTombstones = unionBy(local.chatTombstones, incoming.chatTombstones, (row) => row.id);
+	const coverage = unionBy(local.coverage, incoming.coverage, syncLineKeys.coverage);
+	const checkpoints = unionBy(local.checkpoints, incoming.checkpoints, syncLineKeys.checkpoint);
+	const deletions = unionBy(local.deletions, incoming.deletions, syncLineKeys.deletion);
+	const chatTombstones = unionBy(local.chatTombstones, incoming.chatTombstones, syncLineKeys.chatTombstone);
 	report.nodes = nodes.length - local.nodes.length;
 	report.chains = chains.length - local.chains.length;
 	report.coverage = coverage.length - local.coverage.length;

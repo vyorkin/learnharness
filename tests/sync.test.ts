@@ -12,8 +12,9 @@
  */
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
@@ -287,6 +288,18 @@ describe("the CLI over two data dirs", () => {
 		});
 	}
 
+	/** The async twin: the busy-guard test serves HTTP from THIS process, so a
+	 *  blocking execFileSync would starve the server and the guard would time
+	 *  out instead of skipping. */
+	function syncAsync(args: string[]): Promise<string> {
+		return new Promise((resolve, reject) => {
+			execFile("npx", ["tsx", "scripts/lh-sync.ts", ...args], { cwd: repoRoot, encoding: "utf-8" }, (error, stdout, stderr) => {
+				if (error) reject(new Error(`${error.message}\n${stderr}`));
+				else resolve(stdout);
+			});
+		});
+	}
+
 	it("pulls, merges, pushes; a second run is a no-op; a deletion travels", () => {
 		const a = dataDir("peer-a");
 		const b = dataDir("peer-b");
@@ -314,6 +327,55 @@ describe("the CLI over two data dirs", () => {
 		const second = sync(["--peer-dir", b, "--data", a]);
 		assert.match(second, /nothing new/);
 		assert.equal(fs.readFileSync(path.join(a, "graph", "nodes.jsonl"), "utf-8"), nodesA, "a no-op sync rewrites nothing");
+	});
+
+	it("APPENDS to the local ledgers — existing lines are never rewritten or reordered", () => {
+		const a = dataDir("append-local");
+		const b = dataDir("append-peer");
+		// A local line the peer has never seen, and a local order to preserve.
+		writeNodeLine(a, node("n_local_first", "Local line one.", "2026-01-01T00:00:00.000Z", "chat_a"));
+		writeNodeLine(a, node("n_local_second", "Local line two.", "2026-01-01T00:01:00.000Z", "chat_a"));
+		writeNodeLine(b, node("n_peer", "Peer line.", "2026-01-01T00:02:00.000Z", "chat_b"));
+		const before = fs.readFileSync(path.join(a, "graph", "nodes.jsonl"), "utf-8");
+
+		sync(["--peer-dir", b, "--data", a]);
+		const after = fs.readFileSync(path.join(a, "graph", "nodes.jsonl"), "utf-8");
+		assert.ok(after.startsWith(before), "the existing bytes are untouched — the peer's line was appended");
+		assert.match(after.slice(before.length), /n_peer/, "and exactly the missing line was added");
+	});
+
+	it("a busy app skips the tick (the timer's guard)", async () => {
+		const a = dataDir("busy-local");
+		const b = dataDir("busy-peer");
+		writeNodeLine(b, node("n_busy", "Peer line while busy.", "2026-01-01T00:00:00.000Z", "chat_b"));
+		const server = http.createServer((request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify(request.url === "/api/activity" ? { runs: [{ id: "job_1" }] } : { runs: [] }));
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as { port: number }).port;
+		try {
+			const output = await syncAsync(["--peer-dir", b, "--data", a, "--skip-if-busy", "--app-url", `http://127.0.0.1:${port}`]);
+			assert.match(output, /mid-work — skipping this tick/);
+			assert.equal(fs.existsSync(path.join(a, "graph", "nodes.jsonl")), false, "nothing was pulled or written");
+		} finally {
+			server.close();
+		}
+	});
+
+	it("a second concurrent run is refused by the lock", () => {
+		const a = dataDir("lock-local");
+		const b = dataDir("lock-peer");
+		writeNodeLine(b, node("n_locked", "Peer line.", "2026-01-01T00:00:00.000Z", "chat_b"));
+		const lock = path.join(TMP_DATA, ".sync", "run.lock");
+		fs.mkdirSync(lock, { recursive: true });
+		try {
+			const output = sync(["--peer-dir", b, "--data", a]);
+			assert.match(output, /another sync is running/);
+			assert.equal(fs.existsSync(path.join(a, "graph", "nodes.jsonl")), false);
+		} finally {
+			fs.rmSync(lock, { recursive: true, force: true });
+		}
 	});
 
 	it("refuses to sync a peer that was never migrated to content-addressed ids", () => {
