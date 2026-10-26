@@ -123,6 +123,42 @@ function model(opts: Partial<ConstructorParameters<typeof SessionModel>[0]> = {}
 	return new SessionModel({ chatId: "chat_x", initialMessages: [], ...opts });
 }
 
+// ─── the send() acceptance contract (opening-prompt stash, PR #154) ───────
+
+/** send() resolves with PROOF of acceptance: true only once the POST ack
+ *  landed. The chat page keeps its stashed opening text until then, so a
+ *  reload can retry a message that never left. */
+describe("send() reports whether the POST was accepted", () => {
+	it("true once the ack landed", async () => {
+		globalThis.fetch = dietFetch({ userText: "topic", stream: () => sseResponse({ type: "agent_start" }, "[DONE]") });
+		const m = model();
+		assert.equal(await m.send({ type: "text", text: "topic" }), true);
+	});
+
+	it("false when the POST is refused, with the error banner and the draft restored", async () => {
+		globalThis.fetch = dietFetch({
+			stream: () => sseResponse("[DONE]"),
+			post: () => new Response("no key for this model", { status: 503 }),
+		});
+		const m = model();
+		assert.equal(await m.send({ type: "text", text: "topic" }), false);
+		assert.equal(m.getState().status, "error");
+		assert.match(m.getState().error?.message ?? "", /no key for this model/);
+	});
+
+	it("false when the model is not ready to send (nothing was posted)", async () => {
+		let posted = false;
+		globalThis.fetch = dietFetch({
+			stream: () => sseResponse("[DONE]"),
+			onPost: () => { posted = true; },
+		});
+		const m = model();
+		m.readyRef = false;
+		assert.equal(await m.send({ type: "text", text: "topic" }), false);
+		assert.equal(posted, false);
+	});
+});
+
 // ─── the 409 identity-retry ────────────────────────────────────────────────
 
 interface Call {
